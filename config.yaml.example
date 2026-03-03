@@ -24,6 +24,8 @@ public_gateway:
 tunnel:
   port: "9090"
   ca_cert: "certs/platform-ca.pem"   # CA that signed MMA node client certs
+  tls_cert: "certs/tunnel.crt"       # tunnel server certificate (signed by platform CA)
+  tls_key: "certs/tunnel.key"        # tunnel server private key
 
 # Auth0 JWT validation (for the management REST API)
 auth:

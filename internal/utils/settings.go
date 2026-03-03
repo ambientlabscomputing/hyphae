@@ -37,8 +37,10 @@ type Settings struct {
 
 	// Tunnel listener — mTLS, accepts connections from MMA nodes
 	Tunnel struct {
-		Port   string `yaml:"port"`    // default 9090
-		CACert string `yaml:"ca_cert"` // platform CA cert used to verify node client certs
+		Port    string `yaml:"port"`     // default 9090
+		CACert  string `yaml:"ca_cert"`  // platform CA cert used to verify node client certs
+		TLSCert string `yaml:"tls_cert"` // tunnel server certificate (signed by platform CA)
+		TLSKey  string `yaml:"tls_key"`  // tunnel server private key
 	} `yaml:"tunnel"`
 
 	// Auth0 JWT validation (used by server_api M2M and org_jwt mode)

@@ -16,6 +16,10 @@ type TunnelClientConfig struct {
 	// "hyphae.example.com:9090".
 	HyphaeAddr string
 
+	// ServerName is the expected server name for TLS verification (SNI).
+	// If empty, defaults to the hostname part of HyphaeAddr.
+	ServerName string
+
 	// CACertPath is the path to the Platform CA PEM file used to verify the
 	// Hyphae server's TLS certificate. Leave empty to use the system root pool.
 	CACertPath string

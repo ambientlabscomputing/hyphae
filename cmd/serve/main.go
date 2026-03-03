@@ -47,8 +47,10 @@ func main() {
 	appRouter := router.NewAppRouter(svc, settings, ctx)
 
 	tunnelSrv := tunnel.NewTunnelServer(tunnel.Config{
-		Port:   settings.Tunnel.Port,
-		CACert: settings.Tunnel.CACert,
+		Port:    settings.Tunnel.Port,
+		CACert:  settings.Tunnel.CACert,
+		TLSCert: settings.Tunnel.TLSCert,
+		TLSKey:  settings.Tunnel.TLSKey,
 	}, svc)
 
 	proxySrv := proxy.NewProxyServer(proxy.Config{

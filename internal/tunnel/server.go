@@ -13,6 +13,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -27,20 +28,24 @@ const upgradeHeader = "tunnel"
 
 // Server is the mTLS tunnel listener.
 type Server struct {
-	port   string
-	caCert string
-	svc    service.Service
+	port    string
+	caCert  string
+	tlsCert string
+	tlsKey  string
+	svc     service.Service
 }
 
 // Config holds the minimal settings the tunnel server needs.
 type Config struct {
-	Port   string // e.g. "9090"
-	CACert string // path to platform CA PEM file
+	Port    string // e.g. "9090"
+	CACert  string // path to platform CA PEM file
+	TLSCert string // path to tunnel server certificate PEM file
+	TLSKey  string // path to tunnel server private key PEM file
 }
 
 // NewTunnelServer creates a tunnel listener.
 func NewTunnelServer(cfg Config, svc service.Service) *Server {
-	return &Server{port: cfg.Port, caCert: cfg.CACert, svc: svc}
+	return &Server{port: cfg.Port, caCert: cfg.CACert, tlsCert: cfg.TLSCert, tlsKey: cfg.TLSKey, svc: svc}
 }
 
 // Listen starts accepting mTLS connections on the configured port.
@@ -90,19 +95,45 @@ func (s *Server) Listen(ctx context.Context) error {
 func (s *Server) buildTLSConfig() (*tls.Config, error) {
 	pool := x509.NewCertPool()
 	if s.caCert != "" {
+		// Try to load from file first
 		caPEM, err := os.ReadFile(s.caCert)
-		if err != nil {
+		if err == nil {
+			if !pool.AppendCertsFromPEM(caPEM) {
+				return nil, fmt.Errorf("failed to parse CA cert from %s", s.caCert)
+			}
+		} else if isURLPath(s.caCert) {
+			// If the path looks like a URL, try to fetch it
+			caPEM, err := fetchCA(s.caCert)
+			if err != nil {
+				return nil, fmt.Errorf("failed to fetch CA cert from %s: %w", s.caCert, err)
+			}
+			if !pool.AppendCertsFromPEM(caPEM) {
+				return nil, fmt.Errorf("failed to parse fetched CA cert")
+			}
+		} else {
+			// Not a URL and file doesn't exist
 			return nil, fmt.Errorf("read CA cert %s: %w", s.caCert, err)
-		}
-		if !pool.AppendCertsFromPEM(caPEM) {
-			return nil, fmt.Errorf("failed to parse CA cert from %s", s.caCert)
 		}
 	}
 
+	// Load server certificate and key
+	var serverCerts []tls.Certificate
+	if s.tlsCert != "" && s.tlsKey != "" {
+		cert, err := tls.LoadX509KeyPair(s.tlsCert, s.tlsKey)
+		if err != nil {
+			return nil, fmt.Errorf("load server cert/key: %w", err)
+		}
+		serverCerts = []tls.Certificate{cert}
+	} else if s.tlsCert != "" || s.tlsKey != "" {
+		// One is set but not the other
+		return nil, fmt.Errorf("both tls_cert and tls_key must be set or both must be empty")
+	}
+
 	return &tls.Config{
-		ClientAuth: tls.RequireAndVerifyClientCert,
-		ClientCAs:  pool,
-		MinVersion: tls.VersionTLS13,
+		Certificates: serverCerts,
+		ClientAuth:   tls.RequireAndVerifyClientCert,
+		ClientCAs:    pool,
+		MinVersion:   tls.VersionTLS13,
 	}, nil
 }
 
@@ -205,6 +236,34 @@ func extractServerID(cert *x509.Certificate) string {
 		return "unknown"
 	}
 	return cert.Subject.CommonName
+}
+
+// isURLPath checks if a string looks like an HTTP(S) URL
+func isURLPath(path string) bool {
+	return len(path) > 0 && (path[0:7] == "http://" || (len(path) > 8 && path[0:8] == "https://"))
+}
+
+// fetchCA fetches a CA certificate from an HTTP(S) URL
+func fetchCA(url string) ([]byte, error) {
+	respClient := &http.Client{
+		Timeout: 10 * time.Second,
+	}
+	resp, err := respClient.Get(url)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch CA cert: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("HTTP %d fetching CA cert", resp.StatusCode)
+	}
+
+	caPEM, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read CA cert response: %w", err)
+	}
+
+	return caPEM, nil
 }
 
 func writeHTTPError(conn net.Conn, code int, msg string) {

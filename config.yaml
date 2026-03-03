@@ -10,7 +10,7 @@ base_path: "/api/v1"
 log_level: "debug"
 log_format: "json"
 log_to_stderr: true
-log_to_file: false
+log_to_file: true
 log_file_path: "logs/hyphae.log"
 
 # Public HTTPS gateway — leave cert/key empty to disable TLS in dev
@@ -19,15 +19,19 @@ public_gateway:
   tls_cert: ""
   tls_key: ""
 
-# mTLS tunnel listener — leave ca_cert empty to skip client cert validation in dev
+# mTLS tunnel listener — certs issued from platform CA via serverctl cert issue
 tunnel:
   port: "9090"
-  ca_cert: ""
+  ca_cert: "certs/ca.crt"
+  tls_cert: "certs/tunnel.crt"
+  tls_key: "certs/tunnel.key"
 
 # Auth0 JWT validation — same tenant as server_api
 auth:
   auth_domain: "dev-motk8gx6wyw7nmbr.us.auth0.com"
   auth_audience: "https://ambientdev.com/v1/api"
+  username: "hyphae"
+  password: "HHYp3MMyC"
 
 # Admin Unix socket (used by hyphctl)
 admin_socket:

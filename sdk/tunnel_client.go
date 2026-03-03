@@ -481,6 +481,17 @@ func buildTLSConfig(cfg TunnelClientConfig) (*tls.Config, error) {
 		MinVersion: tls.VersionTLS12,
 	}
 
+	// Set ServerName for SNI verification.
+	if cfg.ServerName != "" {
+		tlsCfg.ServerName = cfg.ServerName
+	} else {
+		// Extract hostname from HyphaeAddr (e.g., "hyphae.example.com:9090" -> "hyphae.example.com")
+		host, _, err := net.SplitHostPort(cfg.HyphaeAddr)
+		if err == nil {
+			tlsCfg.ServerName = host
+		}
+	}
+
 	// Load the CA pool for server verification.
 	if cfg.CACertPath != "" {
 		pool := x509.NewCertPool()

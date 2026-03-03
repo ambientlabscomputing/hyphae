@@ -1,0 +1,37 @@
+syntax = "proto3";
+
+package admin;
+
+option go_package = "github.com/ambientlabscomputing/hyphae/internal/proto/admin;admin";
+
+import "admin/common.proto";
+
+// AdminLeasesService exposes lease management over the admin socket.
+service AdminLeasesService {
+  rpc List(Empty)              returns (ListLeasesResponse) {}
+  rpc Get(GetLeaseRequest)     returns (LeaseProto) {}
+  rpc Revoke(RevokeLeaseRequest) returns (Empty) {}
+}
+
+message LeaseProto {
+  string lease_id   = 1;
+  string org_id     = 2;
+  string hostname   = 3;
+  string server_id  = 4;
+  string status     = 5; // "pending" | "bound" | "error"
+  string created_at = 6;
+  string bound_at   = 7;
+  string expires_at = 8;
+}
+
+message ListLeasesResponse {
+  repeated LeaseProto leases = 1;
+}
+
+message GetLeaseRequest {
+  string lease_id = 1;
+}
+
+message RevokeLeaseRequest {
+  string lease_id = 1;
+}

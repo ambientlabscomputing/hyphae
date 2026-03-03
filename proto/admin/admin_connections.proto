@@ -1,0 +1,24 @@
+syntax = "proto3";
+
+package admin;
+
+option go_package = "github.com/ambientlabscomputing/hyphae/internal/proto/admin;admin";
+
+import "admin/common.proto";
+
+// AdminConnectionsService exposes live tunnel connection info over the admin socket.
+service AdminConnectionsService {
+  rpc List(Empty) returns (ListConnectionsResponse) {}
+}
+
+message ConnectionProto {
+  string conn_id      = 1;
+  string lease_id     = 2;
+  string server_id    = 3;
+  string remote_addr  = 4;
+  string connected_at = 5;
+}
+
+message ListConnectionsResponse {
+  repeated ConnectionProto connections = 1;
+}

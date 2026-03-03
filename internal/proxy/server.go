@@ -1,0 +1,130 @@
+// Package proxy implements the public HTTPS gateway.
+//
+// The ProxyServer listens on the public HTTPS port with a wildcard TLS cert.
+// For each inbound connection it reads the HTTP Host header, looks up the
+// corresponding live tunnel connection in the repository, and pipes traffic
+// bidirectionally between the client and the tunnel net.Conn.
+package proxy
+
+import (
+	"bufio"
+	"context"
+	"crypto/tls"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+
+	"github.com/ambientlabscomputing/hyphae/internal/repository"
+	"github.com/ambientlabscomputing/hyphae/internal/utils"
+)
+
+// Config holds the minimal settings the proxy needs.
+type Config struct {
+	Port    string // e.g. "443"
+	TLSCert string // path to wildcard fullchain PEM
+	TLSKey  string // path to wildcard private key PEM
+}
+
+// Server is the public HTTPS reverse proxy.
+type Server struct {
+	cfg  Config
+	repo repository.Repository
+}
+
+// NewProxyServer creates a public HTTPS proxy.
+func NewProxyServer(cfg Config, repo repository.Repository) *Server {
+	return &Server{cfg: cfg, repo: repo}
+}
+
+// Listen starts accepting HTTPS connections. Blocks until ctx is cancelled.
+func (s *Server) Listen(ctx context.Context) error {
+	logger := utils.GetLogger(ctx)
+
+	if s.cfg.TLSCert == "" || s.cfg.TLSKey == "" {
+		logger.Warn("ProxyServer: TLS cert/key not configured — public gateway disabled")
+		<-ctx.Done()
+		return nil
+	}
+
+	cert, err := tls.LoadX509KeyPair(s.cfg.TLSCert, s.cfg.TLSKey)
+	if err != nil {
+		return fmt.Errorf("proxy: load TLS key pair: %w", err)
+	}
+
+	tlsCfg := &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		MinVersion:   tls.VersionTLS12,
+	}
+
+	ln, err := tls.Listen("tcp", ":"+s.cfg.Port, tlsCfg)
+	if err != nil {
+		return fmt.Errorf("proxy: listen on :%s: %w", s.cfg.Port, err)
+	}
+	defer ln.Close()
+
+	logger.Info("Public HTTPS gateway started", "port", s.cfg.Port)
+
+	go func() {
+		<-ctx.Done()
+		ln.Close()
+	}()
+
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			select {
+			case <-ctx.Done():
+				return nil
+			default:
+				logger.Warn("Proxy accept error", "error", err)
+				continue
+			}
+		}
+		go s.handleConn(ctx, conn)
+	}
+}
+
+func (s *Server) handleConn(ctx context.Context, clientConn net.Conn) {
+	defer clientConn.Close()
+	logger := utils.GetLogger(ctx)
+
+	br := bufio.NewReader(clientConn)
+	req, err := http.ReadRequest(br)
+	if err != nil {
+		logger.Warn("Proxy: failed to read request", "error", err)
+		return
+	}
+
+	host := req.Host
+	if host == "" {
+		writeProxyError(clientConn, http.StatusBadRequest, "missing Host header")
+		return
+	}
+
+	tunnelConn, err := s.repo.GetConnByHostname(ctx, host)
+	if err != nil {
+		logger.Warn("Proxy: no tunnel for host", "host", host, "error", err)
+		writeProxyError(clientConn, http.StatusServiceUnavailable, "no active tunnel for host")
+		return
+	}
+
+	if err := req.Write(tunnelConn); err != nil {
+		logger.Warn("Proxy: failed to forward request", "host", host, "error", err)
+		return
+	}
+
+	done := make(chan struct{}, 2)
+	go func() { io.Copy(tunnelConn, br); done <- struct{}{} }()
+	go func() { io.Copy(clientConn, tunnelConn); done <- struct{}{} }()
+	<-done
+}
+
+func writeProxyError(conn net.Conn, code int, msg string) {
+	body := []byte(msg)
+	resp := fmt.Sprintf(
+		"HTTP/1.1 %d %s\r\nContent-Type: text/plain\r\nContent-Length: %d\r\n\r\n%s",
+		code, http.StatusText(code), len(body), msg,
+	)
+	fmt.Fprint(conn, resp)
+}

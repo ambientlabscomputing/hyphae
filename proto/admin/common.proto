@@ -1,0 +1,8 @@
+syntax = "proto3";
+
+package admin;
+
+option go_package = "github.com/ambientlabscomputing/hyphae/internal/proto/admin;admin";
+
+// Empty is used for RPCs that take or return no payload.
+message Empty {}

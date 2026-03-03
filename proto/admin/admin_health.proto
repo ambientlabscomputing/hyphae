@@ -1,0 +1,27 @@
+syntax = "proto3";
+
+package admin;
+
+option go_package = "github.com/ambientlabscomputing/hyphae/internal/proto/admin;admin";
+
+import "admin/common.proto";
+
+// AdminHealthService exposes health information over the admin socket.
+service AdminHealthService {
+  rpc Check(Empty) returns (HealthCheckResponse) {}
+  rpc Detail(Empty) returns (HealthDetailResponse) {}
+}
+
+message HealthCheckResponse {
+  string status = 1; // "ok" | "degraded"
+  int32  lease_count      = 2;
+  int32  connection_count = 3;
+}
+
+message HealthDetailResponse {
+  string status           = 1;
+  int32  lease_count      = 2;
+  int32  connection_count = 3;
+  string uptime           = 4;
+  string version          = 5;
+}

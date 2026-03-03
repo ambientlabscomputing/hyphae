@@ -1,0 +1,36 @@
+# hyphae configuration example
+# Copy to config.yaml and adjust values for your environment.
+# Set CONFIG_PATH env var to override the default config file location.
+
+# Management REST API
+port: "8084"
+address: "0.0.0.0"
+base_path: "/api/v1"
+
+# Logging
+log_level: "info"         # debug | info | warn | error
+log_format: "json"        # json | text
+log_to_stderr: false
+log_to_file: true
+log_file_path: "logs/hyphae.log"
+
+# Public HTTPS gateway (reverse proxy to tunnel connections)
+public_gateway:
+  port: "443"
+  tls_cert: "certs/fullchain.pem"    # wildcard TLS certificate
+  tls_key: "certs/privkey.pem"
+
+# mTLS tunnel listener (MMA nodes connect here)
+tunnel:
+  port: "9090"
+  ca_cert: "certs/platform-ca.pem"   # CA that signed MMA node client certs
+
+# Auth0 JWT validation (for the management REST API)
+auth:
+  auth_domain: "your-tenant.auth0.com"
+  auth_audience: "https://hyphae.your-domain.com"
+
+# Admin Unix socket (used by hyphctl)
+admin_socket:
+  enabled: true
+  socket_path: "/tmp/hyphae_admin.sock"

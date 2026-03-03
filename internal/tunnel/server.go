@@ -48,6 +48,12 @@ func NewTunnelServer(cfg Config, svc service.Service) *Server {
 func (s *Server) Listen(ctx context.Context) error {
 	logger := utils.GetLogger(ctx)
 
+	if s.caCert == "" {
+		logger.Warn("TunnelServer: ca_cert not configured — tunnel listener disabled")
+		<-ctx.Done()
+		return nil
+	}
+
 	tlsCfg, err := s.buildTLSConfig()
 	if err != nil {
 		return fmt.Errorf("tunnel: build TLS config: %w", err)

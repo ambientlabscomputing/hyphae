@@ -2,16 +2,35 @@ package repository_test
 
 import (
 	"context"
+	"io"
 	"net"
 	"testing"
 
 	"github.com/ambientlabscomputing/hyphae/internal/repository"
 	"github.com/ambientlabscomputing/hyphae/sdk"
+	"github.com/hashicorp/yamux"
 )
 
 func newRepo(t *testing.T) repository.Repository {
 	t.Helper()
 	return repository.NewRepository(context.Background())
+}
+
+// makeSession returns a yamux client session backed by a net.Pipe for testing.
+// The returned cleanup func closes both sides.
+func makeSession(t *testing.T) (*yamux.Session, func()) {
+	t.Helper()
+	cfg := yamux.DefaultConfig()
+	cfg.EnableKeepAlive = false
+	cfg.LogOutput = io.Discard
+	c, s := net.Pipe()
+	client, err := yamux.Client(c, cfg)
+	if err != nil {
+		c.Close()
+		s.Close()
+		t.Fatalf("yamux.Client: %v", err)
+	}
+	return client, func() { client.Close(); s.Close() }
 }
 
 func sampleLease(id, hostname string) *sdk.Lease {
@@ -125,12 +144,15 @@ func TestRevokeLease_ClosesConnection(t *testing.T) {
 	repo := newRepo(t)
 	ctx := context.Background()
 	_ = repo.IssueLease(ctx, sampleLease("lbound", "bound.example.com"))
-	c, s := net.Pipe()
-	defer s.Close()
-	_ = repo.BindLease(ctx, "lbound", c)
+	cfg := yamux.DefaultConfig()
+	cfg.EnableKeepAlive = false
+	cfg.LogOutput = io.Discard
+	c, sRaw := net.Pipe()
+	session, _ := yamux.Client(c, cfg)
+	_, _ = repo.BindLease(ctx, "lbound", session)
 	_ = repo.RevokeLease(ctx, "lbound")
 	buf := make([]byte, 1)
-	if _, err := s.Read(buf); err == nil {
+	if _, err := sRaw.Read(buf); err == nil {
 		t.Fatal("expected closed pipe after revocation")
 	}
 }
@@ -139,10 +161,9 @@ func TestBindLease_SetsStatusBound(t *testing.T) {
 	repo := newRepo(t)
 	ctx := context.Background()
 	_ = repo.IssueLease(ctx, sampleLease("lbind", "bind.example.com"))
-	c, s := net.Pipe()
-	defer c.Close()
-	defer s.Close()
-	if err := repo.BindLease(ctx, "lbind", c); err != nil {
+	session, cleanup := makeSession(t)
+	defer cleanup()
+	if _, err := repo.BindLease(ctx, "lbind", session); err != nil {
 		t.Fatalf("BindLease: %v", err)
 	}
 	got, _ := repo.GetLease(ctx, "lbind")
@@ -156,10 +177,9 @@ func TestBindLease_SetsStatusBound(t *testing.T) {
 
 func TestBindLease_UnknownLease(t *testing.T) {
 	repo := newRepo(t)
-	c, s := net.Pipe()
-	defer c.Close()
-	defer s.Close()
-	if err := repo.BindLease(context.Background(), "missing", c); err == nil {
+	session, cleanup := makeSession(t)
+	defer cleanup()
+	if _, err := repo.BindLease(context.Background(), "missing", session); err == nil {
 		t.Fatal("expected error binding unknown lease")
 	}
 }
@@ -168,13 +188,16 @@ func TestBindLease_RebindClosesOldConn(t *testing.T) {
 	repo := newRepo(t)
 	ctx := context.Background()
 	_ = repo.IssueLease(ctx, sampleLease("lreb", "rebind.example.com"))
+	cfg := yamux.DefaultConfig()
+	cfg.EnableKeepAlive = false
+	cfg.LogOutput = io.Discard
 	c1, s1 := net.Pipe()
+	session1, _ := yamux.Client(c1, cfg)
 	defer s1.Close()
-	_ = repo.BindLease(ctx, "lreb", c1)
-	c2, s2 := net.Pipe()
-	defer c2.Close()
-	defer s2.Close()
-	_ = repo.BindLease(ctx, "lreb", c2)
+	_, _ = repo.BindLease(ctx, "lreb", session1)
+	session2, cleanup2 := makeSession(t)
+	defer cleanup2()
+	_, _ = repo.BindLease(ctx, "lreb", session2)
 	buf := make([]byte, 1)
 	if _, err := s1.Read(buf); err == nil {
 		t.Fatal("old conn should be closed on rebind")
@@ -185,22 +208,21 @@ func TestGetConnByHostname_Success(t *testing.T) {
 	repo := newRepo(t)
 	ctx := context.Background()
 	_ = repo.IssueLease(ctx, sampleLease("lhost", "myhost.example.com"))
-	c, s := net.Pipe()
-	defer c.Close()
-	defer s.Close()
-	_ = repo.BindLease(ctx, "lhost", c)
-	conn, err := repo.GetConnByHostname(ctx, "myhost.example.com")
+	session, cleanup := makeSession(t)
+	defer cleanup()
+	_, _ = repo.BindLease(ctx, "lhost", session)
+	got, err := repo.GetSessionByHostname(ctx, "myhost.example.com")
 	if err != nil {
-		t.Fatalf("GetConnByHostname: %v", err)
+		t.Fatalf("GetSessionByHostname: %v", err)
 	}
-	if conn == nil {
-		t.Fatal("expected non-nil connection")
+	if got == nil {
+		t.Fatal("expected non-nil session")
 	}
 }
 
 func TestGetConnByHostname_NoLease(t *testing.T) {
 	repo := newRepo(t)
-	if _, err := repo.GetConnByHostname(context.Background(), "unknown.example.com"); err == nil {
+	if _, err := repo.GetSessionByHostname(context.Background(), "unknown.example.com"); err == nil {
 		t.Fatal("expected error for unknown hostname")
 	}
 }
@@ -209,7 +231,7 @@ func TestGetConnByHostname_NotBound(t *testing.T) {
 	repo := newRepo(t)
 	ctx := context.Background()
 	_ = repo.IssueLease(ctx, sampleLease("lunb", "unbound.example.com"))
-	if _, err := repo.GetConnByHostname(ctx, "unbound.example.com"); err == nil {
+	if _, err := repo.GetSessionByHostname(ctx, "unbound.example.com"); err == nil {
 		t.Fatal("expected error for unbound lease")
 	}
 }
@@ -230,14 +252,12 @@ func TestListConnections_AfterBind(t *testing.T) {
 	ctx := context.Background()
 	_ = repo.IssueLease(ctx, sampleLease("l1", "a.example.com"))
 	_ = repo.IssueLease(ctx, sampleLease("l2", "b.example.com"))
-	c1, s1 := net.Pipe()
-	defer c1.Close()
-	defer s1.Close()
-	c2, s2 := net.Pipe()
-	defer c2.Close()
-	defer s2.Close()
-	_ = repo.BindLease(ctx, "l1", c1)
-	_ = repo.BindLease(ctx, "l2", c2)
+	s1, cleanup1 := makeSession(t)
+	defer cleanup1()
+	s2, cleanup2 := makeSession(t)
+	defer cleanup2()
+	_, _ = repo.BindLease(ctx, "l1", s1)
+	_, _ = repo.BindLease(ctx, "l2", s2)
 	conns, err := repo.ListConnections(ctx)
 	if err != nil {
 		t.Fatalf("ListConnections: %v", err)
@@ -251,10 +271,9 @@ func TestGetConnection_Found(t *testing.T) {
 	repo := newRepo(t)
 	ctx := context.Background()
 	_ = repo.IssueLease(ctx, sampleLease("lgc", "gc.example.com"))
-	c, s := net.Pipe()
-	defer c.Close()
-	defer s.Close()
-	_ = repo.BindLease(ctx, "lgc", c)
+	session, cleanup := makeSession(t)
+	defer cleanup()
+	_, _ = repo.BindLease(ctx, "lgc", session)
 	conns, _ := repo.ListConnections(ctx)
 	if len(conns) != 1 {
 		t.Fatalf("expected 1 connection")
@@ -279,9 +298,9 @@ func TestRemoveConnection_ResetsLease(t *testing.T) {
 	repo := newRepo(t)
 	ctx := context.Background()
 	_ = repo.IssueLease(ctx, sampleLease("lrm", "rm.example.com"))
-	c, s := net.Pipe()
-	defer s.Close()
-	_ = repo.BindLease(ctx, "lrm", c)
+	session, cleanup := makeSession(t)
+	defer cleanup()
+	_, _ = repo.BindLease(ctx, "lrm", session)
 	conns, _ := repo.ListConnections(ctx)
 	if len(conns) != 1 {
 		t.Fatalf("expected 1 connection")

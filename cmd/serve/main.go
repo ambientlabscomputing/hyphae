@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -76,15 +77,22 @@ func main() {
 		}
 	}()
 
-	if err := appRouter.Run(ctx); err != nil {
-		logger.Error("Management API error", "error", err)
-	}
+	addr := appRouter.Addr()
+	httpSrv := &http.Server{Addr: addr, Handler: appRouter.Handler()}
+	go func() {
+		logger.Info("Management API listening", "addr", addr)
+		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			logger.Error("Management API error", "error", err)
+		}
+	}()
 
 	<-ctx.Done()
 	logger.Info("Shutting down hyphae")
+
+	shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = httpSrv.Shutdown(shutCtx)
 	if adminSrv != nil {
-		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
 		_ = adminSrv.Stop(shutCtx)
 	}
 }

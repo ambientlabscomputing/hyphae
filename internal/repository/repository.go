@@ -3,11 +3,11 @@ package repository
 import (
 	"context"
 	"fmt"
-	"net"
 	"sync"
 	"time"
 
 	"github.com/ambientlabscomputing/hyphae/sdk"
+	"github.com/hashicorp/yamux"
 )
 
 // Repository defines the data-access contract for Hyphae's in-memory store.
@@ -19,8 +19,9 @@ type Repository interface {
 	GetLease(ctx context.Context, leaseID string) (*sdk.Lease, error)
 	ListLeases(ctx context.Context) ([]*sdk.Lease, error)
 	RevokeLease(ctx context.Context, leaseID string) error
-	BindLease(ctx context.Context, leaseID string, conn net.Conn) error
-	GetConnByHostname(ctx context.Context, hostname string) (net.Conn, error)
+	// BindLease registers a yamux session for leaseID and returns the connection ID.
+	BindLease(ctx context.Context, leaseID string, session *yamux.Session) (string, error)
+	GetSessionByHostname(ctx context.Context, hostname string) (*yamux.Session, error)
 
 	// Connection operations
 	ListConnections(ctx context.Context) ([]*sdk.TunnelConnection, error)
@@ -28,10 +29,10 @@ type Repository interface {
 	RemoveConnection(ctx context.Context, connectionID string) error
 }
 
-// tunnelSession holds both the metadata and the live connection for a bound lease.
+// tunnelSession holds both the metadata and the live mux session for a bound lease.
 type tunnelSession struct {
-	meta *sdk.TunnelConnection
-	conn net.Conn
+	meta    *sdk.TunnelConnection
+	session *yamux.Session
 }
 
 // MemoryRepository is a thread-safe in-memory implementation of Repository.
@@ -44,12 +45,14 @@ type MemoryRepository struct {
 }
 
 func NewRepository(ctx context.Context) Repository {
-	return &MemoryRepository{
+	r := &MemoryRepository{
 		leases:       make(map[string]*sdk.Lease),
 		byHost:       make(map[string]string),
 		sessions:     make(map[string]*tunnelSession),
 		leaseSession: make(map[string]string),
 	}
+	go r.reapExpiredLeases(ctx)
+	return r
 }
 
 func (r *MemoryRepository) Health(ctx context.Context) (*map[string]interface{}, error) {
@@ -105,7 +108,7 @@ func (r *MemoryRepository) RevokeLease(ctx context.Context, leaseID string) erro
 	}
 	if connID, ok := r.leaseSession[leaseID]; ok {
 		if s, ok := r.sessions[connID]; ok {
-			s.conn.Close()
+			s.session.Close()
 			delete(r.sessions, connID)
 		}
 		delete(r.leaseSession, leaseID)
@@ -115,16 +118,16 @@ func (r *MemoryRepository) RevokeLease(ctx context.Context, leaseID string) erro
 	return nil
 }
 
-func (r *MemoryRepository) BindLease(ctx context.Context, leaseID string, conn net.Conn) error {
+func (r *MemoryRepository) BindLease(ctx context.Context, leaseID string, session *yamux.Session) (string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	l, ok := r.leases[leaseID]
 	if !ok {
-		return fmt.Errorf("lease %q not found", leaseID)
+		return "", fmt.Errorf("lease %q not found", leaseID)
 	}
 	if oldConnID, ok := r.leaseSession[leaseID]; ok {
 		if s, ok := r.sessions[oldConnID]; ok {
-			s.conn.Close()
+			s.session.Close()
 			delete(r.sessions, oldConnID)
 		}
 	}
@@ -137,15 +140,15 @@ func (r *MemoryRepository) BindLease(ctx context.Context, leaseID string, conn n
 		LeaseID:      leaseID,
 		ServerID:     l.ServerID,
 		OrgID:        l.OrgID,
-		RemoteAddr:   conn.RemoteAddr().String(),
+		RemoteAddr:   session.RemoteAddr().String(),
 		ConnectedAt:  now,
 	}
-	r.sessions[connID] = &tunnelSession{meta: tc, conn: conn}
+	r.sessions[connID] = &tunnelSession{meta: tc, session: session}
 	r.leaseSession[leaseID] = connID
-	return nil
+	return connID, nil
 }
 
-func (r *MemoryRepository) GetConnByHostname(ctx context.Context, hostname string) (net.Conn, error) {
+func (r *MemoryRepository) GetSessionByHostname(ctx context.Context, hostname string) (*yamux.Session, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	leaseID, ok := r.byHost[hostname]
@@ -160,7 +163,7 @@ func (r *MemoryRepository) GetConnByHostname(ctx context.Context, hostname strin
 	if !ok {
 		return nil, fmt.Errorf("session %q not found", connID)
 	}
-	return s.conn, nil
+	return s.session, nil
 }
 
 func (r *MemoryRepository) ListConnections(ctx context.Context) ([]*sdk.TunnelConnection, error) {
@@ -190,7 +193,7 @@ func (r *MemoryRepository) RemoveConnection(ctx context.Context, connectionID st
 	if !ok {
 		return nil
 	}
-	s.conn.Close()
+	s.session.Close()
 	leaseID := s.meta.LeaseID
 	delete(r.sessions, connectionID)
 	if r.leaseSession[leaseID] == connectionID {
@@ -201,4 +204,38 @@ func (r *MemoryRepository) RemoveConnection(ctx context.Context, connectionID st
 		}
 	}
 	return nil
+}
+
+// reapExpiredLeases runs as a background goroutine, evicting leases past their ExpiresAt.
+func (r *MemoryRepository) reapExpiredLeases(ctx context.Context) {
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			r.expireLeases()
+		}
+	}
+}
+
+func (r *MemoryRepository) expireLeases() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	now := time.Now()
+	for leaseID, l := range r.leases {
+		if l.ExpiresAt == nil || !now.After(*l.ExpiresAt) {
+			continue
+		}
+		if connID, ok := r.leaseSession[leaseID]; ok {
+			if s, ok := r.sessions[connID]; ok {
+				s.session.Close()
+				delete(r.sessions, connID)
+			}
+			delete(r.leaseSession, leaseID)
+		}
+		delete(r.byHost, l.Hostname)
+		delete(r.leases, leaseID)
+	}
 }

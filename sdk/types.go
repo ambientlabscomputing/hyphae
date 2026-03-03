@@ -35,6 +35,7 @@ type Lease struct {
 	Status       LeaseStatus `json:"status"`
 	CreatedAt    time.Time   `json:"created_at"`
 	BoundAt      *time.Time  `json:"bound_at,omitempty"`
+	ExpiresAt    *time.Time  `json:"expires_at,omitempty"`
 }
 
 // TunnelConnection represents a live tunnel session from an MMA node.
@@ -56,6 +57,7 @@ type IssueLeaseRequest struct {
 	ServiceName  string `json:"service_name"`
 	Hostname     string `json:"hostname"`
 	TargetPort   int    `json:"target_port"`
+	TTLSeconds   int    `json:"ttl_seconds,omitempty"`
 }
 
 // IssueLeaseResponse is returned by POST /api/v1/leases.

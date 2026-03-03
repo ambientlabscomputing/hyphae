@@ -10,6 +10,7 @@ require (
 	github.com/gin-gonic/gin v1.11.0
 	github.com/golang-jwt/jwt/v4 v4.5.2
 	github.com/google/uuid v1.6.0
+	github.com/hashicorp/yamux v0.1.2
 	github.com/spf13/cobra v1.8.1
 	google.golang.org/grpc v1.78.0
 	google.golang.org/protobuf v1.36.11

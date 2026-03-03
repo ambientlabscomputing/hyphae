@@ -102,21 +102,32 @@ func (s *Server) handleConn(ctx context.Context, clientConn net.Conn) {
 		return
 	}
 
-	tunnelConn, err := s.repo.GetConnByHostname(ctx, host)
+	session, err := s.repo.GetSessionByHostname(ctx, host)
 	if err != nil {
 		logger.Warn("Proxy: no tunnel for host", "host", host, "error", err)
 		writeProxyError(clientConn, http.StatusServiceUnavailable, "no active tunnel for host")
 		return
 	}
 
-	if err := req.Write(tunnelConn); err != nil {
+	// Open a dedicated yamux stream for this request.
+	// Each request gets its own isolated byte stream, so concurrent
+	// requests to the same hostname cannot interleave each other's bytes.
+	stream, err := session.Open()
+	if err != nil {
+		logger.Warn("Proxy: failed to open yamux stream", "host", host, "error", err)
+		writeProxyError(clientConn, http.StatusBadGateway, "tunnel stream unavailable")
+		return
+	}
+	defer stream.Close()
+
+	if err := req.Write(stream); err != nil {
 		logger.Warn("Proxy: failed to forward request", "host", host, "error", err)
 		return
 	}
 
 	done := make(chan struct{}, 2)
-	go func() { io.Copy(tunnelConn, br); done <- struct{}{} }()
-	go func() { io.Copy(clientConn, tunnelConn); done <- struct{}{} }()
+	go func() { io.Copy(stream, br); done <- struct{}{} }()
+	go func() { io.Copy(clientConn, stream); done <- struct{}{} }()
 	<-done
 }
 

@@ -3,12 +3,12 @@ package service
 import (
 	"context"
 	"fmt"
-	"net"
 	"time"
 
 	"github.com/ambientlabscomputing/hyphae/internal/repository"
 	"github.com/ambientlabscomputing/hyphae/sdk"
 	"github.com/google/uuid"
+	"github.com/hashicorp/yamux"
 )
 
 // Service is the business logic interface for Hyphae.
@@ -22,7 +22,8 @@ type Service interface {
 	RevokeLease(ctx context.Context, leaseID string) error
 
 	// Tunnel operations
-	BindTunnel(ctx context.Context, leaseID string, conn net.Conn) error
+	BindTunnel(ctx context.Context, leaseID string, session *yamux.Session) (string, error)
+	UnbindTunnel(ctx context.Context, connectionID string) error
 
 	// Connection queries
 	ListConnections(ctx context.Context) ([]*sdk.TunnelConnection, error)
@@ -56,6 +57,10 @@ func (s *AppService) IssueLease(ctx context.Context, req sdk.IssueLeaseRequest) 
 		Status:       sdk.LeaseStatusPending,
 		CreatedAt:    time.Now(),
 	}
+	if req.TTLSeconds > 0 {
+		t := time.Now().Add(time.Duration(req.TTLSeconds) * time.Second)
+		lease.ExpiresAt = &t
+	}
 	if err := s.repo.IssueLease(ctx, lease); err != nil {
 		return nil, err
 	}
@@ -74,8 +79,12 @@ func (s *AppService) RevokeLease(ctx context.Context, leaseID string) error {
 	return s.repo.RevokeLease(ctx, leaseID)
 }
 
-func (s *AppService) BindTunnel(ctx context.Context, leaseID string, conn net.Conn) error {
-	return s.repo.BindLease(ctx, leaseID, conn)
+func (s *AppService) BindTunnel(ctx context.Context, leaseID string, session *yamux.Session) (string, error) {
+	return s.repo.BindLease(ctx, leaseID, session)
+}
+
+func (s *AppService) UnbindTunnel(ctx context.Context, connectionID string) error {
+	return s.repo.RemoveConnection(ctx, connectionID)
 }
 
 func (s *AppService) ListConnections(ctx context.Context) ([]*sdk.TunnelConnection, error) {

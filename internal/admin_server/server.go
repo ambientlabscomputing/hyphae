@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"google.golang.org/grpc"
@@ -232,16 +233,17 @@ func toGRPCError(err error) error {
 	if err == nil {
 		return nil
 	}
-	switch err.Error() {
-	case "not found":
-		return status.Error(codes.NotFound, err.Error())
-	case "already exists":
-		return status.Error(codes.AlreadyExists, err.Error())
-	case "invalid argument":
-		return status.Error(codes.InvalidArgument, err.Error())
-	case "unauthorized":
-		return status.Error(codes.PermissionDenied, err.Error())
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "not found"):
+		return status.Error(codes.NotFound, msg)
+	case strings.Contains(msg, "already exists") || strings.Contains(msg, "already has an active"):
+		return status.Error(codes.AlreadyExists, msg)
+	case strings.Contains(msg, "invalid argument") || strings.Contains(msg, "is required"):
+		return status.Error(codes.InvalidArgument, msg)
+	case strings.Contains(msg, "unauthorized"):
+		return status.Error(codes.PermissionDenied, msg)
 	default:
-		return status.Error(codes.Internal, err.Error())
+		return status.Error(codes.Internal, msg)
 	}
 }

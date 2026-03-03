@@ -16,19 +16,17 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/ambientlabscomputing/hyphae/internal/service"
 	"github.com/ambientlabscomputing/hyphae/internal/utils"
+	"github.com/hashicorp/yamux"
 )
 
 const upgradeHeader = "tunnel"
 
 // Server is the mTLS tunnel listener.
 type Server struct {
-	settings interface {
-		TunnelPort() string
-		TunnelCACert() string
-	}
 	port   string
 	caCert string
 	svc    service.Service
@@ -151,31 +149,47 @@ func (s *Server) handleConn(ctx context.Context, rawConn net.Conn) {
 		return
 	}
 
-	// Bind the raw connection to the lease.
-	if err := s.svc.BindTunnel(ctx, leaseID, tlsConn); err != nil {
-		logger.Error("Tunnel: BindTunnel failed", "lease_id", leaseID, "error", err)
-		writeHTTPError(tlsConn, http.StatusBadRequest, err.Error())
+	// Acknowledge the upgrade — MMA expects 101 before starting yamux.
+	ack := "HTTP/1.1 101 Switching Protocols\r\nUpgrade: tunnel\r\nConnection: Upgrade\r\n\r\n"
+	if _, err := fmt.Fprint(tlsConn, ack); err != nil {
+		logger.Warn("Tunnel: failed to send 101", "error", err)
 		rawConn.Close()
 		return
 	}
 
-	// Acknowledge the upgrade.
-	resp := "HTTP/1.1 101 Switching Protocols\r\nUpgrade: tunnel\r\nConnection: Upgrade\r\n\r\n"
-	if _, err := fmt.Fprint(tlsConn, resp); err != nil {
-		logger.Warn("Tunnel: failed to send 101", "error", err)
+	// Wrap the upgraded connection in a yamux server session.
+	// MMA's side calls yamux.Client after receiving the 101.
+	yamuxCfg := yamux.DefaultConfig()
+	yamuxCfg.KeepAliveInterval = 30 * time.Second
+	session, err := yamux.Server(tlsConn, yamuxCfg)
+	if err != nil {
+		logger.Error("Tunnel: yamux.Server failed", "lease_id", leaseID, "error", err)
+		writeHTTPError(tlsConn, http.StatusInternalServerError, "mux init failed")
 		return
 	}
 
+	connID, err := s.svc.BindTunnel(ctx, leaseID, session)
+	if err != nil {
+		logger.Error("Tunnel: BindTunnel failed", "lease_id", leaseID, "error", err)
+		session.Close()
+		return
+	}
+	defer s.svc.UnbindTunnel(ctx, connID)
+
 	logger.Info("Tunnel: lease bound", "lease_id", leaseID, "server_id", nodeServerID)
 
-	// Hold the connection open — net.Conn lifetime is managed by the repository.
-	// When revoked or the peer closes, Read will return an error.
-	buf := make([]byte, 1)
+	// Hold the session open by draining inbound streams.
+	// AcceptStream returns an error when the session closes (either side).
+	// This goroutine must NOT read from tlsConn directly — the proxy
+	// opens yamux streams through the session and owns those byte flows.
 	for {
-		if _, err := tlsConn.Read(buf); err != nil {
-			logger.Info("Tunnel: connection closed", "lease_id", leaseID, "error", err)
+		stream, err := session.AcceptStream()
+		if err != nil {
+			logger.Info("Tunnel: session closed", "lease_id", leaseID, "conn_id", connID, "error", err)
 			return
 		}
+		// We don't expect the node to open streams toward Hyphae.
+		go stream.Close()
 	}
 }
 

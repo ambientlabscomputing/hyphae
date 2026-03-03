@@ -2,12 +2,14 @@ package service_test
 
 import (
 	"context"
+	"io"
 	"net"
 	"testing"
 
 	"github.com/ambientlabscomputing/hyphae/internal/repository"
 	"github.com/ambientlabscomputing/hyphae/internal/service"
 	"github.com/ambientlabscomputing/hyphae/sdk"
+	"github.com/hashicorp/yamux"
 )
 
 func newSvc(t *testing.T) service.Service {
@@ -19,6 +21,21 @@ func newSvc(t *testing.T) service.Service {
 		t.Fatalf("NewService: %v", err)
 	}
 	return svc
+}
+
+func makeSession(t *testing.T) (*yamux.Session, func()) {
+	t.Helper()
+	cfg := yamux.DefaultConfig()
+	cfg.EnableKeepAlive = false
+	cfg.LogOutput = io.Discard
+	c, s := net.Pipe()
+	client, err := yamux.Client(c, cfg)
+	if err != nil {
+		c.Close()
+		s.Close()
+		t.Fatalf("yamux.Client: %v", err)
+	}
+	return client, func() { client.Close(); s.Close() }
 }
 
 func validReq(hostname string) sdk.IssueLeaseRequest {
@@ -150,10 +167,9 @@ func TestService_BindTunnel_UpdatesStatus(t *testing.T) {
 	svc := newSvc(t)
 	ctx := context.Background()
 	l, _ := svc.IssueLease(ctx, validReq("bind.example.com"))
-	c, s := net.Pipe()
-	defer c.Close()
-	defer s.Close()
-	if err := svc.BindTunnel(ctx, l.LeaseID, c); err != nil {
+	session, cleanup := makeSession(t)
+	defer cleanup()
+	if _, err := svc.BindTunnel(ctx, l.LeaseID, session); err != nil {
 		t.Fatalf("BindTunnel: %v", err)
 	}
 	got, _ := svc.GetLease(ctx, l.LeaseID)
@@ -164,10 +180,9 @@ func TestService_BindTunnel_UpdatesStatus(t *testing.T) {
 
 func TestService_BindTunnel_UnknownLease(t *testing.T) {
 	svc := newSvc(t)
-	c, s := net.Pipe()
-	defer c.Close()
-	defer s.Close()
-	if err := svc.BindTunnel(context.Background(), "ghost", c); err == nil {
+	session, cleanup := makeSession(t)
+	defer cleanup()
+	if _, err := svc.BindTunnel(context.Background(), "ghost", session); err == nil {
 		t.Fatal("expected error")
 	}
 }
@@ -187,10 +202,9 @@ func TestService_ListConnections_AfterBind(t *testing.T) {
 	svc := newSvc(t)
 	ctx := context.Background()
 	l, _ := svc.IssueLease(ctx, validReq("conn.example.com"))
-	c, s := net.Pipe()
-	defer c.Close()
-	defer s.Close()
-	_ = svc.BindTunnel(ctx, l.LeaseID, c)
+	session, cleanup := makeSession(t)
+	defer cleanup()
+	_, _ = svc.BindTunnel(ctx, l.LeaseID, session)
 	conns, err := svc.ListConnections(ctx)
 	if err != nil {
 		t.Fatalf("ListConnections: %v", err)
@@ -207,10 +221,9 @@ func TestService_ListConnections_ConnectionHasFields(t *testing.T) {
 	svc := newSvc(t)
 	ctx := context.Background()
 	l, _ := svc.IssueLease(ctx, validReq("fields.example.com"))
-	c, s := net.Pipe()
-	defer c.Close()
-	defer s.Close()
-	_ = svc.BindTunnel(ctx, l.LeaseID, c)
+	session, cleanup := makeSession(t)
+	defer cleanup()
+	_, _ = svc.BindTunnel(ctx, l.LeaseID, session)
 	conns, _ := svc.ListConnections(ctx)
 	if len(conns) == 0 {
 		t.Fatal("expected connections")

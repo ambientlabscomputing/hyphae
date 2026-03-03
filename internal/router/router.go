@@ -57,6 +57,16 @@ func (r *AppRouter) Run(ctx context.Context) error {
 	return r.engine.Run(addr)
 }
 
+// Addr returns the listen address for the management API.
+func (r *AppRouter) Addr() string {
+	return r.settings.Address + ":" + r.settings.Port
+}
+
+// Handler returns the underlying http.Handler for use with http.Server.
+func (r *AppRouter) Handler() http.Handler {
+	return r.engine
+}
+
 // ── Handlers ──────────────────────────────────────────────────────────────────
 
 // HealthHandler godoc

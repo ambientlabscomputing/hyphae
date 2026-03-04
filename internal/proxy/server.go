@@ -41,29 +41,36 @@ func NewProxyServer(cfg Config, repo repository.Repository) *Server {
 func (s *Server) Listen(ctx context.Context) error {
 	logger := utils.GetLogger(ctx)
 
+	var ln net.Listener
+
 	if s.cfg.TLSCert == "" || s.cfg.TLSKey == "" {
-		logger.Warn("ProxyServer: TLS cert/key not configured — public gateway disabled")
-		<-ctx.Done()
-		return nil
-	}
+		// Dev mode: plain HTTP fallback when no TLS cert/key configured
+		logger.Warn("ProxyServer: TLS cert/key not configured — falling back to plain HTTP (dev mode)")
+		var listenErr error
+		ln, listenErr = net.Listen("tcp", ":"+s.cfg.Port)
+		if listenErr != nil {
+			return fmt.Errorf("proxy: listen on :%s: %w", s.cfg.Port, listenErr)
+		}
+	} else {
+		cert, err := tls.LoadX509KeyPair(s.cfg.TLSCert, s.cfg.TLSKey)
+		if err != nil {
+			return fmt.Errorf("proxy: load TLS key pair: %w", err)
+		}
 
-	cert, err := tls.LoadX509KeyPair(s.cfg.TLSCert, s.cfg.TLSKey)
-	if err != nil {
-		return fmt.Errorf("proxy: load TLS key pair: %w", err)
-	}
+		tlsCfg := &tls.Config{
+			Certificates: []tls.Certificate{cert},
+			MinVersion:   tls.VersionTLS12,
+		}
 
-	tlsCfg := &tls.Config{
-		Certificates: []tls.Certificate{cert},
-		MinVersion:   tls.VersionTLS12,
-	}
-
-	ln, err := tls.Listen("tcp", ":"+s.cfg.Port, tlsCfg)
-	if err != nil {
-		return fmt.Errorf("proxy: listen on :%s: %w", s.cfg.Port, err)
+		var listenErr error
+		ln, listenErr = tls.Listen("tcp", ":"+s.cfg.Port, tlsCfg)
+		if listenErr != nil {
+			return fmt.Errorf("proxy: listen on :%s: %w", s.cfg.Port, listenErr)
+		}
 	}
 	defer ln.Close()
 
-	logger.Info("Public HTTPS gateway started", "port", s.cfg.Port)
+	logger.Info("Public gateway started", "port", s.cfg.Port, "tls", s.cfg.TLSCert != "")
 
 	go func() {
 		<-ctx.Done()

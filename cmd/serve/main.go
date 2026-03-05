@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"os"
 	"os/signal"
@@ -26,7 +27,8 @@ func main() {
 
 	settings, err := utils.LoadSettings()
 	if err != nil {
-		panic("failed to load settings: " + err.Error())
+		fmt.Fprintf(os.Stderr, "hyphae: failed to load settings: %v\n", err)
+		os.Exit(1)
 	}
 
 	logger, ctx := utils.InitLoggerWithContext(ctx, settings)
@@ -34,7 +36,10 @@ func main() {
 
 	repo := repository.NewRepository(ctx)
 
-	svc, err := service.NewService(ctx, repo)
+	svc, err := service.NewService(ctx, repo, service.ServiceConfig{
+		MaxLeasesPerOrg: settings.Leases.MaxPerOrg,
+		MaxTTLSeconds:   settings.Leases.MaxTTLSeconds,
+	})
 	if err != nil {
 		logger.Error("Failed to create service", "error", err)
 		os.Exit(1)
@@ -47,16 +52,23 @@ func main() {
 	appRouter := router.NewAppRouter(svc, settings, ctx)
 
 	tunnelSrv := tunnel.NewTunnelServer(tunnel.Config{
-		Port:    settings.Tunnel.Port,
-		CACert:  settings.Tunnel.CACert,
-		TLSCert: settings.Tunnel.TLSCert,
-		TLSKey:  settings.Tunnel.TLSKey,
+		Port:                  settings.Tunnel.Port,
+		CACert:                settings.Tunnel.CACert,
+		TLSCert:               settings.Tunnel.TLSCert,
+		TLSKey:                settings.Tunnel.TLSKey,
+		HandshakeTimeout:      settings.TunnelHandshakeTimeout(),
+		MaxConnectionsPerNode: settings.Tunnel.MaxConnectionsPerNode,
+		MaxTotalConnections:   settings.Tunnel.MaxTotalConnections,
 	}, svc)
 
 	proxySrv := proxy.NewProxyServer(proxy.Config{
-		Port:    settings.PublicGateway.Port,
-		TLSCert: settings.PublicGateway.TLSCert,
-		TLSKey:  settings.PublicGateway.TLSKey,
+		Port:           settings.PublicGateway.Port,
+		TLSCert:        settings.PublicGateway.TLSCert,
+		TLSKey:         settings.PublicGateway.TLSKey,
+		MaxConnections: settings.PublicGateway.MaxConnections,
+		ReadTimeout:    settings.PublicGatewayReadTimeout(),
+		WriteTimeout:   settings.PublicGatewayWriteTimeout(),
+		IdleTimeout:    settings.PublicGatewayIdleTimeout(),
 	}, repo)
 
 	var adminSrv *admin_server.AdminServer
@@ -80,7 +92,14 @@ func main() {
 	}()
 
 	addr := appRouter.Addr()
-	httpSrv := &http.Server{Addr: addr, Handler: appRouter.Handler()}
+	httpSrv := &http.Server{
+		Addr:              addr,
+		Handler:           appRouter.Handler(),
+		ReadTimeout:       10 * time.Second,
+		ReadHeaderTimeout: 5 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
 	go func() {
 		logger.Info("Management API listening", "addr", addr)
 		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -89,12 +108,27 @@ func main() {
 	}()
 
 	<-ctx.Done()
-	logger.Info("Shutting down hyphae")
+	logger.Info("Shutting down hyphae — draining connections (15s)")
 
-	shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	// Orderly shutdown: management API first (stops new requests),
+	// then admin socket, then proxy/tunnel (context cancel closes their listeners).
+	shutCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	_ = httpSrv.Shutdown(shutCtx)
+
+	if err := httpSrv.Shutdown(shutCtx); err != nil {
+		logger.Warn("Management API shutdown error", "error", err)
+	}
 	if adminSrv != nil {
-		_ = adminSrv.Stop(shutCtx)
+		if err := adminSrv.Stop(shutCtx); err != nil {
+			logger.Warn("Admin server shutdown error", "error", err)
+		}
+	}
+	// Proxy and tunnel servers are stopped by context cancellation above.
+	// Give them a moment to drain active connections.
+	select {
+	case <-shutCtx.Done():
+		logger.Warn("Shutdown timed out — forcing exit")
+	case <-time.After(5 * time.Second):
+		logger.Info("Hyphae stopped cleanly")
 	}
 }

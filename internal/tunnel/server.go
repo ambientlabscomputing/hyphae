@@ -13,10 +13,11 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"os"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ambientlabscomputing/hyphae/internal/service"
@@ -28,24 +29,56 @@ const upgradeHeader = "tunnel"
 
 // Server is the mTLS tunnel listener.
 type Server struct {
-	port    string
-	caCert  string
-	tlsCert string
-	tlsKey  string
-	svc     service.Service
+	port                  string
+	caCert                string
+	tlsCert               string
+	tlsKey                string
+	handshakeTimeout      time.Duration
+	maxConnectionsPerNode int
+	svc                   service.Service
+
+	// totalSem is a counting semaphore that caps the total number of concurrent
+	// tunnel sessions. nil means no limit.
+	totalSem chan struct{}
+
+	// nodeConns tracks active connection counts per node CN (server_id).
+	// Values are *atomic.Int32.
+	nodeConns sync.Map
 }
 
 // Config holds the minimal settings the tunnel server needs.
 type Config struct {
-	Port    string // e.g. "9090"
-	CACert  string // path to platform CA PEM file
-	TLSCert string // path to tunnel server certificate PEM file
-	TLSKey  string // path to tunnel server private key PEM file
+	Port                  string        // e.g. "9090"
+	CACert                string        // path to platform CA PEM file (file path only)
+	TLSCert               string        // path to tunnel server certificate PEM file
+	TLSKey                string        // path to tunnel server private key PEM file
+	HandshakeTimeout      time.Duration // deadline for TLS + HTTP upgrade; 0 = 10s default
+	MaxConnectionsPerNode int           // per-node limit; 0 = 10 default
+	MaxTotalConnections   int           // total session limit; 0 = 1000 default
 }
 
 // NewTunnelServer creates a tunnel listener.
 func NewTunnelServer(cfg Config, svc service.Service) *Server {
-	return &Server{port: cfg.Port, caCert: cfg.CACert, tlsCert: cfg.TLSCert, tlsKey: cfg.TLSKey, svc: svc}
+	if cfg.HandshakeTimeout == 0 {
+		cfg.HandshakeTimeout = 10 * time.Second
+	}
+	if cfg.MaxConnectionsPerNode == 0 {
+		cfg.MaxConnectionsPerNode = 10
+	}
+
+	s := &Server{
+		port:                  cfg.Port,
+		caCert:                cfg.CACert,
+		tlsCert:               cfg.TLSCert,
+		tlsKey:                cfg.TLSKey,
+		handshakeTimeout:      cfg.HandshakeTimeout,
+		maxConnectionsPerNode: cfg.MaxConnectionsPerNode,
+		svc:                   svc,
+	}
+	if cfg.MaxTotalConnections > 0 {
+		s.totalSem = make(chan struct{}, cfg.MaxTotalConnections)
+	}
+	return s
 }
 
 // Listen starts accepting mTLS connections on the configured port.
@@ -95,24 +128,13 @@ func (s *Server) Listen(ctx context.Context) error {
 func (s *Server) buildTLSConfig() (*tls.Config, error) {
 	pool := x509.NewCertPool()
 	if s.caCert != "" {
-		// Try to load from file first
+		// File-only CA loading — no remote URL fetching in production.
 		caPEM, err := os.ReadFile(s.caCert)
-		if err == nil {
-			if !pool.AppendCertsFromPEM(caPEM) {
-				return nil, fmt.Errorf("failed to parse CA cert from %s", s.caCert)
-			}
-		} else if isURLPath(s.caCert) {
-			// If the path looks like a URL, try to fetch it
-			caPEM, err := fetchCA(s.caCert)
-			if err != nil {
-				return nil, fmt.Errorf("failed to fetch CA cert from %s: %w", s.caCert, err)
-			}
-			if !pool.AppendCertsFromPEM(caPEM) {
-				return nil, fmt.Errorf("failed to parse fetched CA cert")
-			}
-		} else {
-			// Not a URL and file doesn't exist
+		if err != nil {
 			return nil, fmt.Errorf("read CA cert %s: %w", s.caCert, err)
+		}
+		if !pool.AppendCertsFromPEM(caPEM) {
+			return nil, fmt.Errorf("failed to parse CA cert from %s", s.caCert)
 		}
 	}
 
@@ -125,7 +147,6 @@ func (s *Server) buildTLSConfig() (*tls.Config, error) {
 		}
 		serverCerts = []tls.Certificate{cert}
 	} else if s.tlsCert != "" || s.tlsKey != "" {
-		// One is set but not the other
 		return nil, fmt.Errorf("both tls_cert and tls_key must be set or both must be empty")
 	}
 
@@ -147,6 +168,14 @@ func (s *Server) handleConn(ctx context.Context, rawConn net.Conn) {
 		return
 	}
 
+	// Set a hard deadline covering both TLS handshake and HTTP upgrade.
+	// This prevents slow peers with valid certs from holding goroutines.
+	if err := tlsConn.SetDeadline(time.Now().Add(s.handshakeTimeout)); err != nil {
+		logger.Warn("Tunnel: failed to set handshake deadline", "error", err)
+		rawConn.Close()
+		return
+	}
+
 	// Complete the TLS handshake so we can inspect the client certificate.
 	if err := tlsConn.Handshake(); err != nil {
 		logger.Warn("Tunnel TLS handshake failed", "error", err)
@@ -162,9 +191,38 @@ func (s *Server) handleConn(ctx context.Context, rawConn net.Conn) {
 	}
 
 	nodeServerID := extractServerID(state.PeerCertificates[0])
+
+	// Enforce per-node connection limit.
+	counter := s.getNodeCounter(nodeServerID)
+	current := counter.Add(1)
+	if int(current) > s.maxConnectionsPerNode {
+		counter.Add(-1)
+		logger.Warn("Tunnel: per-node connection limit exceeded",
+			"server_id", nodeServerID,
+			"limit", s.maxConnectionsPerNode,
+		)
+		writeHTTPError(tlsConn, http.StatusTooManyRequests, "per-node connection limit exceeded")
+		rawConn.Close()
+		return
+	}
+	defer counter.Add(-1)
+
+	// Enforce total connection limit.
+	if s.totalSem != nil {
+		select {
+		case s.totalSem <- struct{}{}:
+			defer func() { <-s.totalSem }()
+		default:
+			logger.Warn("Tunnel: total connection limit reached")
+			writeHTTPError(tlsConn, http.StatusServiceUnavailable, "tunnel capacity exceeded")
+			rawConn.Close()
+			return
+		}
+	}
+
 	logger.Info("Tunnel: node connected", "server_id", nodeServerID, "remote", rawConn.RemoteAddr())
 
-	// Read the HTTP upgrade request.
+	// Read the HTTP upgrade request (deadline already set above).
 	br := bufio.NewReader(tlsConn)
 	req, err := http.ReadRequest(br)
 	if err != nil {
@@ -182,6 +240,33 @@ func (s *Server) handleConn(ctx context.Context, rawConn net.Conn) {
 
 	if req.Header.Get("Upgrade") != upgradeHeader {
 		writeHTTPError(tlsConn, http.StatusUpgradeRequired, "must upgrade to tunnel")
+		rawConn.Close()
+		return
+	}
+
+	// Validate that the connecting node's cert CN matches the lease's ServerID.
+	// This prevents any valid-cert node from hijacking another node's lease.
+	lease, err := s.svc.GetLease(ctx, leaseID)
+	if err != nil {
+		logger.Warn("Tunnel: lease not found", "lease_id", leaseID, "error", err)
+		writeHTTPError(tlsConn, http.StatusNotFound, "lease not found")
+		rawConn.Close()
+		return
+	}
+	if lease.ServerID != "" && lease.ServerID != nodeServerID {
+		logger.Warn("Tunnel: cert CN does not match lease server_id",
+			"cert_cn", nodeServerID,
+			"lease_server_id", lease.ServerID,
+			"lease_id", leaseID,
+		)
+		writeHTTPError(tlsConn, http.StatusForbidden, "node identity does not match lease")
+		rawConn.Close()
+		return
+	}
+
+	// Clear the deadline before long-lived yamux session begins.
+	if err := tlsConn.SetDeadline(time.Time{}); err != nil {
+		logger.Warn("Tunnel: failed to clear deadline", "error", err)
 		rawConn.Close()
 		return
 	}
@@ -230,6 +315,12 @@ func (s *Server) handleConn(ctx context.Context, rawConn net.Conn) {
 	}
 }
 
+// getNodeCounter returns (or initialises) the atomic counter for a given node CN.
+func (s *Server) getNodeCounter(nodeServerID string) *atomic.Int32 {
+	v, _ := s.nodeConns.LoadOrStore(nodeServerID, &atomic.Int32{})
+	return v.(*atomic.Int32)
+}
+
 // extractServerID reads the CN from the client certificate as the server ID.
 func extractServerID(cert *x509.Certificate) string {
 	if cert == nil {
@@ -238,39 +329,11 @@ func extractServerID(cert *x509.Certificate) string {
 	return cert.Subject.CommonName
 }
 
-// isURLPath checks if a string looks like an HTTP(S) URL
-func isURLPath(path string) bool {
-	return len(path) > 0 && (path[0:7] == "http://" || (len(path) > 8 && path[0:8] == "https://"))
-}
-
-// fetchCA fetches a CA certificate from an HTTP(S) URL
-func fetchCA(url string) ([]byte, error) {
-	respClient := &http.Client{
-		Timeout: 10 * time.Second,
-	}
-	resp, err := respClient.Get(url)
-	if err != nil {
-		return nil, fmt.Errorf("failed to fetch CA cert: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("HTTP %d fetching CA cert", resp.StatusCode)
-	}
-
-	caPEM, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read CA cert response: %w", err)
-	}
-
-	return caPEM, nil
-}
-
 func writeHTTPError(conn net.Conn, code int, msg string) {
 	body := []byte(msg)
 	resp := fmt.Sprintf(
 		"HTTP/1.1 %d %s\r\nContent-Type: text/plain\r\nContent-Length: %d\r\n\r\n%s",
 		code, http.StatusText(code), len(body), msg,
 	)
-	fmt.Fprint(conn, resp)
+	fmt.Fprint(conn, resp) //nolint:errcheck
 }

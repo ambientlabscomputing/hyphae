@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"reflect"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -30,17 +31,24 @@ type Settings struct {
 
 	// Public TLS gateway (wildcard cert for *.underleafapp.com)
 	PublicGateway struct {
-		Port    string `yaml:"port"`     // default 443
-		TLSCert string `yaml:"tls_cert"` // path to fullchain PEM
-		TLSKey  string `yaml:"tls_key"`  // path to private key PEM
+		Port           string `yaml:"port"`            // default 443
+		TLSCert        string `yaml:"tls_cert"`        // path to fullchain PEM
+		TLSKey         string `yaml:"tls_key"`         // path to private key PEM
+		MaxConnections int    `yaml:"max_connections"` // 0 = 10000 (default)
+		ReadTimeout    string `yaml:"read_timeout"`    // duration string, default "30s"
+		WriteTimeout   string `yaml:"write_timeout"`   // duration string, default "60s"
+		IdleTimeout    string `yaml:"idle_timeout"`    // duration string, default "60s"
 	} `yaml:"public_gateway"`
 
 	// Tunnel listener — mTLS, accepts connections from MMA nodes
 	Tunnel struct {
-		Port    string `yaml:"port"`     // default 9090
-		CACert  string `yaml:"ca_cert"`  // platform CA cert used to verify node client certs
-		TLSCert string `yaml:"tls_cert"` // tunnel server certificate (signed by platform CA)
-		TLSKey  string `yaml:"tls_key"`  // tunnel server private key
+		Port                  string `yaml:"port"`                     // default 9090
+		CACert                string `yaml:"ca_cert"`                  // platform CA cert
+		TLSCert               string `yaml:"tls_cert"`                 // tunnel server certificate
+		TLSKey                string `yaml:"tls_key"`                  // tunnel server private key
+		HandshakeTimeout      string `yaml:"handshake_timeout"`        // default "10s"
+		MaxConnectionsPerNode int    `yaml:"max_connections_per_node"` // 0 = 10 (default)
+		MaxTotalConnections   int    `yaml:"max_total_connections"`    // 0 = 1000 (default)
 	} `yaml:"tunnel"`
 
 	// Auth0 JWT validation (used by server_api M2M and org_jwt mode)
@@ -48,6 +56,19 @@ type Settings struct {
 		AuthDomain   string `yaml:"auth_domain"`
 		AuthAudience string `yaml:"auth_audience"`
 	} `yaml:"auth"`
+
+	// Rate limiting for management API
+	RateLimiting struct {
+		Enabled           bool    `yaml:"enabled"`             // default true
+		RequestsPerMinute float64 `yaml:"requests_per_minute"` // default 60
+		Burst             int     `yaml:"burst"`               // default 20
+	} `yaml:"rate_limiting"`
+
+	// Lease policy
+	Leases struct {
+		MaxPerOrg     int   `yaml:"max_per_org"`     // 0 = 100 (default)
+		MaxTTLSeconds int64 `yaml:"max_ttl_seconds"` // 0 = 86400 (default)
+	} `yaml:"leases"`
 
 	// Admin Unix socket (hyphctl)
 	AdminSocket struct {
@@ -68,7 +89,10 @@ var defaults = map[string]interface{}{
 }
 
 // LoadSettings reads config from $CONFIG_PATH (default ./config.yaml) and
-// applies defaults for unset fields.
+// applies defaults for unset fields. Secrets can be overridden via env vars:
+//
+//	HYPHAE_AUTH_DOMAIN    — overrides auth.auth_domain
+//	HYPHAE_AUTH_AUDIENCE  — overrides auth.auth_audience
 func LoadSettings() (*Settings, error) {
 	slog.Info("Loading settings")
 	settings := Settings{}
@@ -108,15 +132,100 @@ func LoadSettings() (*Settings, error) {
 		}
 	}
 
+	// Env var overrides for secrets (never commit these to config.yaml)
+	if v := os.Getenv("HYPHAE_AUTH_DOMAIN"); v != "" {
+		settings.Auth.AuthDomain = v
+	}
+	if v := os.Getenv("HYPHAE_AUTH_AUDIENCE"); v != "" {
+		settings.Auth.AuthAudience = v
+	}
+
 	if err := settings.Validate(); err != nil {
 		return nil, err
 	}
 	return &settings, nil
 }
 
+// Validate checks required fields and fills in defaults for optional ones.
 func (s *Settings) Validate() error {
 	if !s.LogToStderr && !s.LogToFile {
 		return fmt.Errorf("at least one of log_to_stderr or log_to_file must be true")
 	}
+	if s.Auth.AuthDomain == "" {
+		return fmt.Errorf("auth.auth_domain is required (or set HYPHAE_AUTH_DOMAIN)")
+	}
+	if s.Auth.AuthAudience == "" {
+		return fmt.Errorf("auth.auth_audience is required (or set HYPHAE_AUTH_AUDIENCE)")
+	}
+
+	// Apply numeric defaults for new optional fields
+	if s.PublicGateway.MaxConnections == 0 {
+		s.PublicGateway.MaxConnections = 10000
+	}
+	if s.PublicGateway.ReadTimeout == "" {
+		s.PublicGateway.ReadTimeout = "30s"
+	}
+	if s.PublicGateway.WriteTimeout == "" {
+		s.PublicGateway.WriteTimeout = "60s"
+	}
+	if s.PublicGateway.IdleTimeout == "" {
+		s.PublicGateway.IdleTimeout = "60s"
+	}
+	if s.Tunnel.HandshakeTimeout == "" {
+		s.Tunnel.HandshakeTimeout = "10s"
+	}
+	if s.Tunnel.MaxConnectionsPerNode == 0 {
+		s.Tunnel.MaxConnectionsPerNode = 10
+	}
+	if s.Tunnel.MaxTotalConnections == 0 {
+		s.Tunnel.MaxTotalConnections = 1000
+	}
+	if s.RateLimiting.RequestsPerMinute == 0 {
+		s.RateLimiting.Enabled = true
+		s.RateLimiting.RequestsPerMinute = 60
+		s.RateLimiting.Burst = 20
+	}
+	if s.Leases.MaxPerOrg == 0 {
+		s.Leases.MaxPerOrg = 100
+	}
+	if s.Leases.MaxTTLSeconds == 0 {
+		s.Leases.MaxTTLSeconds = 86400
+	}
+
+	// Validate all duration strings are parseable
+	for _, pair := range []struct{ label, val string }{
+		{"public_gateway.read_timeout", s.PublicGateway.ReadTimeout},
+		{"public_gateway.write_timeout", s.PublicGateway.WriteTimeout},
+		{"public_gateway.idle_timeout", s.PublicGateway.IdleTimeout},
+		{"tunnel.handshake_timeout", s.Tunnel.HandshakeTimeout},
+	} {
+		if _, err := time.ParseDuration(pair.val); err != nil {
+			return fmt.Errorf("invalid duration for %s %q: %w", pair.label, pair.val, err)
+		}
+	}
 	return nil
+}
+
+// PublicGatewayReadTimeout returns the parsed ReadTimeout duration.
+func (s *Settings) PublicGatewayReadTimeout() time.Duration {
+	d, _ := time.ParseDuration(s.PublicGateway.ReadTimeout)
+	return d
+}
+
+// PublicGatewayWriteTimeout returns the parsed WriteTimeout duration.
+func (s *Settings) PublicGatewayWriteTimeout() time.Duration {
+	d, _ := time.ParseDuration(s.PublicGateway.WriteTimeout)
+	return d
+}
+
+// PublicGatewayIdleTimeout returns the parsed IdleTimeout duration.
+func (s *Settings) PublicGatewayIdleTimeout() time.Duration {
+	d, _ := time.ParseDuration(s.PublicGateway.IdleTimeout)
+	return d
+}
+
+// TunnelHandshakeTimeout returns the parsed TunnelHandshakeTimeout duration.
+func (s *Settings) TunnelHandshakeTimeout() time.Duration {
+	d, _ := time.ParseDuration(s.Tunnel.HandshakeTimeout)
+	return d
 }

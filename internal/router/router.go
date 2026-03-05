@@ -25,6 +25,7 @@ func NewAppRouter(svc service.Service, settings *utils.Settings, appCtx context.
 	engine := gin.New()
 	engine.Use(SlogRecoveryMiddleware(appCtx))
 	engine.Use(SlogLoggerMiddleware(appCtx))
+	engine.Use(SecurityHeadersMiddleware())
 
 	r := &AppRouter{
 		engine:   engine,
@@ -39,7 +40,12 @@ func NewAppRouter(svc service.Service, settings *utils.Settings, appCtx context.
 	// Management API — requires Auth0 JWT
 	api := engine.Group(settings.BasePath)
 	api.Use(TraceIDMiddleware(appCtx))
+	if settings.RateLimiting.Enabled {
+		api.Use(RateLimitMiddleware(settings.RateLimiting.RequestsPerMinute, settings.RateLimiting.Burst))
+	}
 	api.Use(JWTAuthMiddleware(appCtx))
+	// Limit request bodies to 1 MiB on mutating endpoints.
+	api.Use(MaxBodySizeMiddleware(1 << 20))
 
 	api.POST("/leases", r.IssueLeaseHandler)
 	api.GET("/leases", r.ListLeasesHandler)

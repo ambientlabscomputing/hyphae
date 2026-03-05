@@ -9,15 +9,37 @@ services:
     container_name: hyphae
     restart: unless-stopped
     ports:
-      - "8084:8084"   # management API
+      # 8084 (management API) is intentionally NOT published to the host.
+      # server_api reaches it over the Docker network (hyphae:8084) or
+      # via a firewall-restricted private interface. Never expose port 8084
+      # to the public internet.
       - "9090:9090"   # tunnel listener (mTLS, inbound from MMA nodes)
       - "443:443"     # public HTTPS gateway
     environment:
       CONFIG_PATH: /app/config.yaml
+      # Override secrets via env vars rather than committing them to config.yaml:
+      # HYPHAE_AUTH_DOMAIN: your-tenant.auth0.com
+      # HYPHAE_AUTH_AUDIENCE: https://hyphae.your-domain.com
     volumes:
       - ./config.yaml:/app/config.yaml:ro
       # Mount TLS certs directory (wildcard cert + platform CA)
       - ./certs:/app/certs:ro
+      # Writable tmpfs for log files when read_only: true is set
+      - type: tmpfs
+        target: /app/logs
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 1G
+        reservations:
+          cpus: '0.25'
+          memory: 128M
     networks:
       - hyphae-network
     healthcheck:

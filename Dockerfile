@@ -20,7 +20,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o hyphae ./cmd/serv
 RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o hyphctl ./cmd/hyphctl
 
 # Runtime stage
-FROM alpine:latest
+FROM alpine:3.21
 
 # Install ca-certificates for HTTPS (--no-scripts avoids trigger issues in ARM64 QEMU)
 RUN apk --no-cache add --no-scripts ca-certificates tzdata wget

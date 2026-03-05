@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"net/http"
 	"runtime/debug"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/MicahParks/keyfunc"
@@ -13,14 +15,22 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v4"
 	"github.com/google/uuid"
+	"golang.org/x/time/rate"
 )
 
 // ── JWKS ─────────────────────────────────────────────────────────────────────
 
-var jwks *keyfunc.JWKS
+var (
+	jwks        *keyfunc.JWKS
+	jwtAudience string
+	jwtIssuer   string
+)
 
 // StartMiddleware initialises the JWKS key cache from Auth0.
 func StartMiddleware(ctx context.Context, settings *utils.Settings) error {
+	jwtAudience = settings.Auth.AuthAudience
+	// Auth0 issuer is always https://<domain>/
+	jwtIssuer = "https://" + settings.Auth.AuthDomain + "/"
 	return initJWKS(ctx, settings)
 }
 
@@ -41,18 +51,27 @@ func initJWKS(ctx context.Context, settings *utils.Settings) error {
 }
 
 // VerifyToken parses and validates a JWT using the cached JWKS.
+// It enforces RS256, audience, and issuer claims.
 func VerifyToken(tokenString string) (*jwt.Token, error) {
 	if jwks == nil {
-		return nil, fmt.Errorf("JWKS not initialised")
+		return nil, fmt.Errorf("JWKS not initialized")
 	}
 	claims := jwt.MapClaims{}
 	token, err := jwt.ParseWithClaims(tokenString, claims, jwks.Keyfunc,
-		jwt.WithValidMethods([]string{"RS256"}))
+		jwt.WithValidMethods([]string{"RS256"}),
+	)
 	if err != nil {
 		return nil, err
 	}
 	if !token.Valid {
 		return nil, fmt.Errorf("token is invalid")
+	}
+	// Validate audience and issuer explicitly (jwt/v4 doesn't have option helpers for these).
+	if !claims.VerifyAudience(jwtAudience, true) {
+		return nil, fmt.Errorf("token audience mismatch")
+	}
+	if !claims.VerifyIssuer(jwtIssuer, true) {
+		return nil, fmt.Errorf("token issuer mismatch")
 	}
 	return token, nil
 }
@@ -60,8 +79,6 @@ func VerifyToken(tokenString string) (*jwt.Token, error) {
 // ── Auth middleware ───────────────────────────────────────────────────────────
 
 // JWTAuthMiddleware validates a Bearer JWT (Auth0 RS256).
-// server_api uses its M2M client_credentials grant to talk to this endpoint,
-// so the token will be a standard Auth0 JWT — no custom "uf_" prefix handling needed here.
 func JWTAuthMiddleware(appCtx context.Context) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		logger := utils.GetLogger(appCtx)
@@ -73,8 +90,19 @@ func JWTAuthMiddleware(appCtx context.Context) gin.HandlerFunc {
 			return
 		}
 
-		var tokenString string
-		fmt.Sscanf(authHeader, "Bearer %s", &tokenString)
+		// Robust Bearer extraction — handles extra whitespace.
+		const bearerPrefix = "Bearer "
+		if !strings.HasPrefix(authHeader, bearerPrefix) {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid Authorization header format"})
+			c.Abort()
+			return
+		}
+		tokenString := strings.TrimSpace(authHeader[len(bearerPrefix):])
+		if tokenString == "" {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "empty bearer token"})
+			c.Abort()
+			return
+		}
 
 		token, err := VerifyToken(tokenString)
 		if err != nil {
@@ -95,6 +123,99 @@ func JWTAuthMiddleware(appCtx context.Context) gin.HandlerFunc {
 			c.Set("requester_sub", sub)
 		}
 
+		c.Next()
+	}
+}
+
+// ── Rate limiting ─────────────────────────────────────────────────────────────
+
+type ipRateLimiter struct {
+	mu       sync.Mutex
+	limiters map[string]*rateLimiterEntry
+	r        rate.Limit
+	b        int
+}
+
+type rateLimiterEntry struct {
+	limiter  *rate.Limiter
+	lastSeen time.Time
+}
+
+func newIPRateLimiter(r rate.Limit, b int) *ipRateLimiter {
+	rl := &ipRateLimiter{
+		limiters: make(map[string]*rateLimiterEntry),
+		r:        r,
+		b:        b,
+	}
+	// Periodically evict entries not seen in the last 5 minutes.
+	go func() {
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		for range ticker.C {
+			rl.mu.Lock()
+			for ip, entry := range rl.limiters {
+				if time.Since(entry.lastSeen) > 5*time.Minute {
+					delete(rl.limiters, ip)
+				}
+			}
+			rl.mu.Unlock()
+		}
+	}()
+	return rl
+}
+
+func (rl *ipRateLimiter) getLimiter(ip string) *rate.Limiter {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	entry, exists := rl.limiters[ip]
+	if !exists {
+		lim := rate.NewLimiter(rl.r, rl.b)
+		rl.limiters[ip] = &rateLimiterEntry{limiter: lim, lastSeen: time.Now()}
+		return lim
+	}
+	entry.lastSeen = time.Now()
+	return entry.limiter
+}
+
+// RateLimitMiddleware enforces per-IP request rate limits on the management API.
+func RateLimitMiddleware(requestsPerMinute float64, burst int) gin.HandlerFunc {
+	limiter := newIPRateLimiter(rate.Limit(requestsPerMinute/60.0), burst)
+	return func(c *gin.Context) {
+		ip := c.ClientIP()
+		if !limiter.getLimiter(ip).Allow() {
+			c.Header("Retry-After", "60")
+			c.JSON(http.StatusTooManyRequests, gin.H{"error": "rate limit exceeded"})
+			c.Abort()
+			return
+		}
+		c.Next()
+	}
+}
+
+// ── Security headers middleware ───────────────────────────────────────────────
+
+// SecurityHeadersMiddleware adds HTTP security headers to all responses.
+func SecurityHeadersMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.Header("X-Content-Type-Options", "nosniff")
+		c.Header("X-Frame-Options", "DENY")
+		c.Header("Cache-Control", "no-store")
+		c.Header("Strict-Transport-Security", "max-age=63072000; includeSubDomains")
+		c.Next()
+	}
+}
+
+// ── Request body limit middleware ─────────────────────────────────────────────
+
+// MaxBodySizeMiddleware rejects requests with a body larger than maxBytes.
+func MaxBodySizeMiddleware(maxBytes int64) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if c.Request.ContentLength > maxBytes {
+			c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "request body too large"})
+			c.Abort()
+			return
+		}
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxBytes)
 		c.Next()
 	}
 }

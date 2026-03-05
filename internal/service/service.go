@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"time"
 
 	"github.com/ambientlabscomputing/hyphae/internal/repository"
@@ -10,6 +11,10 @@ import (
 	"github.com/google/uuid"
 	"github.com/hashicorp/yamux"
 )
+
+// hostnamePattern accepts valid DNS labels: letters, digits, dots, hyphens.
+// Must not start or end with a hyphen or dot.
+var hostnamePattern = regexp.MustCompile(`^[a-zA-Z0-9]([a-zA-Z0-9.\-]*[a-zA-Z0-9])?$`)
 
 // Service is the business logic interface for Hyphae.
 type Service interface {
@@ -29,13 +34,26 @@ type Service interface {
 	ListConnections(ctx context.Context) ([]*sdk.TunnelConnection, error)
 }
 
+// ServiceConfig holds policy limits for the service layer.
+type ServiceConfig struct {
+	MaxLeasesPerOrg int   // 0 = 100 default
+	MaxTTLSeconds   int64 // 0 = 86400 default
+}
+
 // AppService implements Service.
 type AppService struct {
 	repo repository.Repository
+	cfg  ServiceConfig
 }
 
-func NewService(ctx context.Context, repo repository.Repository) (Service, error) {
-	return &AppService{repo: repo}, nil
+func NewService(ctx context.Context, repo repository.Repository, cfg ServiceConfig) (Service, error) {
+	if cfg.MaxLeasesPerOrg == 0 {
+		cfg.MaxLeasesPerOrg = 100
+	}
+	if cfg.MaxTTLSeconds == 0 {
+		cfg.MaxTTLSeconds = 86400
+	}
+	return &AppService{repo: repo, cfg: cfg}, nil
 }
 
 func (s *AppService) IssueLease(ctx context.Context, req sdk.IssueLeaseRequest) (*sdk.Lease, error) {
@@ -45,6 +63,35 @@ func (s *AppService) IssueLease(ctx context.Context, req sdk.IssueLeaseRequest) 
 	if req.OrgID == "" {
 		return nil, fmt.Errorf("org_id is required")
 	}
+
+	// Validate hostname format.
+	if len(req.Hostname) > 253 {
+		return nil, fmt.Errorf("hostname exceeds 253 characters")
+	}
+	if !hostnamePattern.MatchString(req.Hostname) {
+		return nil, fmt.Errorf("hostname %q contains invalid characters (only letters, digits, dots, hyphens allowed)", req.Hostname)
+	}
+
+	// Enforce maximum TTL.
+	if int64(req.TTLSeconds) > s.cfg.MaxTTLSeconds {
+		return nil, fmt.Errorf("ttl_seconds %d exceeds maximum allowed value of %d", req.TTLSeconds, s.cfg.MaxTTLSeconds)
+	}
+
+	// Enforce per-org lease limit.
+	allLeases, err := s.repo.ListLeases(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to check org lease count: %w", err)
+	}
+	orgCount := 0
+	for _, l := range allLeases {
+		if l.OrgID == req.OrgID {
+			orgCount++
+		}
+	}
+	if orgCount >= s.cfg.MaxLeasesPerOrg {
+		return nil, fmt.Errorf("org %q has reached the maximum of %d active leases", req.OrgID, s.cfg.MaxLeasesPerOrg)
+	}
+
 	lease := &sdk.Lease{
 		LeaseID:      uuid.NewString(),
 		ExposureID:   req.ExposureID,

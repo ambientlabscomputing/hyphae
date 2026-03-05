@@ -2,6 +2,7 @@ version: '3.8'
 
 services:
   hyphae:
+    image: ambientlabsjose/hyphae:develop
     build:
       context: .
       dockerfile: Dockerfile

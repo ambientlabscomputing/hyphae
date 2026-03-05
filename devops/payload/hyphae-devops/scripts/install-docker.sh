@@ -11,12 +11,12 @@ fi
 echo "Installing Docker..."
 
 echo "  deleting old versions..."
-sudo apt remove $(dpkg --get-selections docker.io docker-compose docker-compose-v2 docker-doc podman-docker containerd runc | cut -f1)
+sudo apt-get remove -y $(dpkg --get-selections docker.io docker-compose docker-compose-v2 docker-doc podman-docker containerd runc 2>/dev/null | cut -f1) 2>/dev/null || true
 
 echo "  installing dependencies..."
 # Add Docker's official GPG key:
-sudo apt update
-sudo apt install ca-certificates curl
+sudo apt-get update -qq
+sudo apt-get install -y ca-certificates curl
 sudo install -m 0755 -d /etc/apt/keyrings
 sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
 sudo chmod a+r /etc/apt/keyrings/docker.asc
@@ -29,11 +29,14 @@ Components: stable
 Signed-By: /etc/apt/keyrings/docker.asc
 EOF
 
-sudo apt update
+sudo apt-get update -qq
 
 echo "  installing Docker Engine..."
-sudo apt install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+# Add current user to docker group so docker can be used without sudo.
+# newgrp would open an interactive shell, so instead we rely on the group taking
+# effect on the next login / SSH session (which deploy-payload.sh handles by
+# re-SSH-ing for the docker compose step).
 sudo usermod -aG docker $USER
-newgrp docker
 
 echo "Docker installed successfully"

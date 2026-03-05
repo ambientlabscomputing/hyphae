@@ -1,0 +1,75 @@
+# services:
+#     hyphae:
+#         image: ambientlabsjose/hyphae:develop
+#         ports:
+#             - "80:80"
+#             - "443:443"
+#         volumes:
+#             - ./hyphae/certs:/etc/underleaf/certs:ro
+#             - ./hyphae/config.yaml:/etc/underleaf/config.yaml:ro
+#             - ./hyphae/logs:/var/log/underleaf:rw
+#         environment:
+#             - CONFIG_PATH=/etc/underleaf/config.yaml
+
+
+#####################################
+#####################################
+
+services:
+    hyphae:
+        image: ambientlabsjose/hyphae:develop
+        container_name: hyphae
+        restart: unless-stopped
+        ports:
+            # 8084 (management API) is intentionally NOT published to the host.
+            # server_api reaches it over the Docker network (hyphae:8084) or
+            # via a firewall-restricted private interface. Never expose port 8084
+            # to the public internet.
+            - "9090:9090"   # tunnel listener (mTLS, inbound from MMA nodes)
+            - "443:443"     # public HTTPS gateway
+        environment:
+            CONFIG_PATH: /etc/underleaf/config.yaml
+            # Override secrets via env vars rather than committing them to config.yaml:
+            # HYPHAE_AUTH_DOMAIN: your-tenant.auth0.com
+            # HYPHAE_AUTH_AUDIENCE: https://hyphae.your-domain.com
+        volumes:
+            - ./hyphae/config.yaml:/etc/underleaf/config.yaml:ro
+            # Mount TLS certs directory (wildcard cert + platform CA)
+            - ./hyphae/certs:/etc/underleaf/certs:ro
+            # Writable tmpfs for log files
+            - type: tmpfs
+              target: /var/log/underleaf
+        security_opt:
+            - no-new-privileges:true
+        cap_drop:
+            - ALL
+        deploy:
+            resources:
+                limits:
+                    cpus: '2.0'
+                    memory: 1G
+                reservations:
+                    cpus: '0.25'
+                    memory: 128M
+        networks:
+            - hyphae-network
+        healthcheck:
+            test: ["CMD", "wget", "--spider", "-q", "http://localhost:8084/health"]
+            interval: 30s
+            timeout: 10s
+            retries: 3
+            start_period: 20s
+    
+    cf_tunnel:
+        # docker run cloudflare/cloudflared:latest tunnel --no-autoupdate run --token eyJhIjoiNzQyNmRmYzM3ZTZiODk4NTAyYWJlZmIzZjllM2E1MDUiLCJ0IjoiYTkzYjdjMjMtOWRmZC00NzFlLWJlMTItMzJkN2E4NDI2MGI4IiwicyI6Ik56SmtPVGczT1RVdE5EazNNQzAwWkdZNExXSmlNbVV0TVRReFlXRXlNRFkyWmprNSJ9
+        image: cloudflare/cloudflared:latest
+        container_name: cf_tunnel
+        restart: unless-stopped
+        command: tunnel --no-autoupdate run --token eyJhIjoiNzQyNmRmYzM3ZTZiODk4NTAyYWJlZmIzZjllM2E1MDUiLCJ0IjoiYTkzYjdjMjMtOWRmZC00NzFlLWJlMTItMzJkN2E4NDI2MGI4IiwicyI6Ik56SmtPVGczT1RVdE5EazNNQzAwWkdZNExXSmlNbVV0TVRReFlXRXlNRFkyWmprNSJ9
+        networks:
+            - hyphae-network
+
+
+networks:
+  hyphae-network:
+    driver: bridge

@@ -16,20 +16,22 @@ fi
 VM_NAME="$(cat "$VM_NAME_FILE")"
 echo "Targeting OrbStack VM: $VM_NAME"
 
-# --- Stage tunnel certs into the payload directory ---
-# certs are in hyphae/certs/ and are gitignored inside the payload (see .gitignore)
+# --- Verify certs exist (they are mounted via /mnt/mac, not copied) ---
+# Certs live at hyphae/certs/ on the Mac and are accessed inside the VM
+# through OrbStack's automatic /mnt/mac FUSE mount. No staging needed.
 SRC_CERTS="$HYPHAE_DIR/certs"
-DEST_CERTS="$PAYLOAD_DIR/hyphae/certs"
-
 if [ ! -d "$SRC_CERTS" ] || [ -z "$(ls -A "$SRC_CERTS")" ]; then
-    echo "Warning: $SRC_CERTS is empty or missing. The hyphae tunnel listener will fail to start without certs." >&2
-else
-    echo "Staging tunnel certs from $SRC_CERTS → $DEST_CERTS"
-    cp "$SRC_CERTS"/. "$DEST_CERTS"/ 2>/dev/null || cp -r "$SRC_CERTS"/. "$DEST_CERTS"/
-    # Ensure certs are readable by the container process.
-    # Private keys are typically 600 on macOS; make them 644 so the Docker
-    # process (which may run as a non-root user) can read them.
-    chmod 644 "$DEST_CERTS"/*
+    echo "Warning: $SRC_CERTS is empty or missing." >&2
+    echo "  The hyphae tunnel listener will fail without certs." >&2
+    echo "  Create them with: make -C $DEVOPS_DIR cert" >&2
+fi
+
+# --- Verify .env is present before copying ---
+ENV_FILE="$PAYLOAD_DIR/.env"
+if [ ! -f "$ENV_FILE" ]; then
+    echo "Error: $ENV_FILE not found." >&2
+    echo "Copy $PAYLOAD_DIR/.env.example → $PAYLOAD_DIR/.env and fill in secrets." >&2
+    exit 1
 fi
 
 # --- Wait for VM SSH to be ready ---

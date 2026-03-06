@@ -1,6 +1,9 @@
 #!/bin/sh
-VERSION="v1.4.4"
+set -e
+
+DEFAULT_VERSION="v1.4.4"
 FORCE=false
+
 while getopts "f" opt; do
   case $opt in
     f) FORCE=true ;;
@@ -9,43 +12,54 @@ while getopts "f" opt; do
        exit 1 ;;
   esac
 done
-shift $((OPTIND -1))
-VERSION=${1:-$VERSION}
+shift $((OPTIND - 1))
 
-# check if ufctl is already installed and at the correct version
-# example output of `ufctl version`:
-# ufctl
-# ✓ Underleaf CLI - Use --help to see available commands
+VERSION="${1:-$DEFAULT_VERSION}"
 
+# Detect CPU architecture and map to release suffix.
+ARCH="$(uname -m)"
+case "$ARCH" in
+  aarch64|arm64) ARCH_SUFFIX="linux-arm64" ;;
+  x86_64)        ARCH_SUFFIX="linux-amd64" ;;
+  *)
+    echo "Error: unsupported architecture '$ARCH'. Only arm64 and amd64 are supported." >&2
+    exit 1 ;;
+esac
 
-# Version: dev-b56f7de, Go Version: go1.25.5, OS/Arch: linux/arm64
-if command -v ufctl > /dev/null 2>&1
-then
-    INSTALLED_VERSION=$(ufctl | grep "Version:" | awk '{print $2}' | tr -d ',')
+echo "Architecture detected: $ARCH → $ARCH_SUFFIX"
+
+# Check if ufctl is already installed at the correct version.
+# Example output of 'ufctl version':
+#   ufctl
+#   ✓ Underleaf CLI - Use --help to see available commands
+#   Version: v1.4.4, Go Version: go1.25.5, OS/Arch: linux/arm64
+if command -v ufctl > /dev/null 2>&1; then
+    INSTALLED_VERSION="$(ufctl | grep "Version:" | awk '{print $2}' | tr -d ',')"
     if echo "$INSTALLED_VERSION" | grep -qE "^${VERSION}$" && [ "$FORCE" = false ]; then
-        echo "Underleaf client version $INSTALLED_VERSION is already installed. Skipping installation."
+        echo "Underleaf client $INSTALLED_VERSION already installed. Skipping."
         exit 0
     else
-        echo "Underleaf client version $INSTALLED_VERSION is installed, but version $VERSION is required. Reinstalling..."
+        echo "Installed: $INSTALLED_VERSION — required: $VERSION. Reinstalling..."
     fi
 else
-    echo "Underleaf client is not installed. Installing version $VERSION..."
+    echo "Underleaf client not installed. Installing $VERSION..."
 fi
 
+BASE_URL="https://github.com/ambientlabscomputing/underleaf_client/releases/download/${VERSION}"
+
 # Download ufctl
-echo "Installing Underleaf client version ${VERSION}..."
-echo "from https://github.com/ambientlabscomputing/underleaf_client/releases/download/${VERSION}/ufctl-linux-arm64"
-curl -L -o ufctl https://github.com/ambientlabscomputing/underleaf_client/releases/download/${VERSION}/ufctl-linux-arm64
+echo "Downloading ufctl ${VERSION} for ${ARCH_SUFFIX}..."
+curl -L --fail -o ufctl "${BASE_URL}/ufctl-${ARCH_SUFFIX}"
 chmod +x ufctl
 sudo mv ufctl /usr/local/bin/
 
 # Download underleaf_agent
-echo "from https://github.com/ambientlabscomputing/underleaf_client/releases/download/${VERSION}/underleaf_agent-linux-arm64"
-curl -L -o underleaf_agent https://github.com/ambientlabscomputing/underleaf_client/releases/download/${VERSION}/underleaf_agent-linux-arm64
+echo "Downloading underleaf_agent ${VERSION} for ${ARCH_SUFFIX}..."
+curl -L --fail -o underleaf_agent "${BASE_URL}/underleaf_agent-${ARCH_SUFFIX}"
 chmod +x underleaf_agent
 sudo mv underleaf_agent /usr/local/bin/
 
-echo "Underleaf client installed successfully."
+echo "Underleaf client ${VERSION} installed successfully."
 echo "Useful commands:"
 echo "  ufctl auth login"
 echo "  ufctl start"

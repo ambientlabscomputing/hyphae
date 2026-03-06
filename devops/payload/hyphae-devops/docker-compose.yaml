@@ -1,23 +1,9 @@
-# services:
-#     hyphae:
-#         image: ambientlabsjose/hyphae:develop
-#         ports:
-#             - "80:80"
-#             - "443:443"
-#         volumes:
-#             - ./hyphae/certs:/etc/underleaf/certs:ro
-#             - ./hyphae/config.yaml:/etc/underleaf/config.yaml:ro
-#             - ./hyphae/logs:/var/log/underleaf:rw
-#         environment:
-#             - CONFIG_PATH=/etc/underleaf/config.yaml
-
-
-#####################################
-#####################################
+# Variable substitution is sourced from .env (gitignored).
+# Copy .env.example → .env and fill in secrets before running 'make setup'.
 
 services:
     hyphae:
-        image: ambientlabsjose/hyphae:develop
+        image: ambientlabsjose/hyphae:${HYPHAE_IMAGE_TAG:-develop}
         container_name: hyphae
         restart: unless-stopped
         ports:
@@ -36,15 +22,24 @@ services:
             # HYPHAE_AUTH_AUDIENCE: https://hyphae.your-domain.com
         volumes:
             - ./hyphae/config.yaml:/etc/underleaf/config.yaml:ro
-            # Mount TLS certs directory (wildcard cert + platform CA)
-            - ./hyphae/certs:/etc/underleaf/certs:ro
-            # Writable tmpfs for log files
-            - type: tmpfs
-              target: /var/log/underleaf
+            # Certs are mounted directly from the Mac via OrbStack's /mnt/mac FUSE mount.
+            # Set HYPHAE_CERTS_PATH in .env (e.g. /mnt/mac/Users/you/.../hyphae/certs).
+            # This means certs only need to be created once on the Mac — no copying needed.
+            - ${HYPHAE_CERTS_PATH}:/etc/underleaf/certs:ro
+            # Log directory bind-mounted from Mac via /mnt/mac so logs persist and are
+            # directly readable on the host without ssh-ing into the VM.
+            # config.yaml.template writes to /var/log/underleaf/hyphae.log (container path).
+            # Set HYPHAE_LOGS_PATH in .env (e.g. /mnt/mac/Users/you/.../hyphae/logs).
+            - ${HYPHAE_LOGS_PATH}:/var/log/underleaf
         security_opt:
             - no-new-privileges:true
         cap_drop:
             - ALL
+        cap_add:
+            # DAC_READ_SEARCH: read files owned by other users (/mnt/mac cert files).
+            # DAC_OVERRIDE:    write files owned by other users (/mnt/mac log files).
+            - DAC_READ_SEARCH
+            - DAC_OVERRIDE
         deploy:
             resources:
                 limits:
@@ -63,11 +58,14 @@ services:
             start_period: 20s
     
     cf_tunnel:
-        # docker run cloudflare/cloudflared:latest tunnel --no-autoupdate run --token eyJhIjoiNzQyNmRmYzM3ZTZiODk4NTAyYWJlZmIzZjllM2E1MDUiLCJ0IjoiYTkzYjdjMjMtOWRmZC00NzFlLWJlMTItMzJkN2E4NDI2MGI4IiwicyI6Ik56SmtPVGczT1RVdE5EazNNQzAwWkdZNExXSmlNbVV0TVRReFlXRXlNRFkyWmprNSJ9
+        # Cloudflare tunnel — optional, start with 'make run-with-tunnel'.
+        # CF_TUNNEL_TOKEN is sourced from .env. Obtain the token from the
+        # Cloudflare Zero Trust dashboard under Tunnels → your tunnel → Install connector.
         image: cloudflare/cloudflared:latest
         container_name: cf_tunnel
         restart: unless-stopped
-        command: tunnel --no-autoupdate run --token eyJhIjoiNzQyNmRmYzM3ZTZiODk4NTAyYWJlZmIzZjllM2E1MDUiLCJ0IjoiYTkzYjdjMjMtOWRmZC00NzFlLWJlMTItMzJkN2E4NDI2MGI4IiwicyI6Ik56SmtPVGczT1RVdE5EazNNQzAwWkdZNExXSmlNbVV0TVRReFlXRXlNRFkyWmprNSJ9
+        profiles: ["tunnel"]
+        command: tunnel --no-autoupdate run --token ${CF_TUNNEL_TOKEN}
         networks:
             - hyphae-network
 

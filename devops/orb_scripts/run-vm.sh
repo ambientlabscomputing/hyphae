@@ -6,6 +6,20 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEVOPS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 VM_NAME_FILE="$DEVOPS_DIR/.vm-name"
 
+# --- Preflight checks ---
+if ! command -v orb > /dev/null 2>&1; then
+    echo "Error: 'orb' CLI not found. Install OrbStack from https://orbstack.dev and try again." >&2
+    exit 1
+fi
+
+if [ -f "$VM_NAME_FILE" ]; then
+    EXISTING_VM="$(cat "$VM_NAME_FILE")"
+    echo "Error: A VM is already registered: $EXISTING_VM" >&2
+    echo "Run 'make destroy' to remove it before creating a new one," >&2
+    echo "or 'make redeploy' to update the existing VM without recreating it." >&2
+    exit 1
+fi
+
 # create random name to avoid collisions with existing VMs
 VM_NAME="hyphae-host-$RANDOM"
 

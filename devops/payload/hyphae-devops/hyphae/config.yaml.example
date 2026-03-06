@@ -1,0 +1,52 @@
+# hyphae/config.yaml.example
+# Reference for the generated hyphae/config.yaml (produced by 'make render-config').
+# Actual config.yaml is gitignored — copy this as a starting point if you need to
+# understand the config structure.
+
+# Management REST API
+port: "8084"
+address: "0.0.0.0"
+base_path: "/api/v1"
+
+log_level: "debug"
+log_format: "json"
+log_to_stderr: true
+log_to_file: true
+log_file_path: "/var/log/underleaf/hyphae.log"
+
+public_gateway:
+  port: "443"
+  tls_cert: ""
+  tls_key: ""
+  max_connections: 10000
+  read_timeout: "30s"
+  write_timeout: "60s"
+  idle_timeout: "60s"
+
+tunnel:
+  port: "9090"
+  ca_cert: "/etc/underleaf/certs/ca.crt"
+  tls_cert: "/etc/underleaf/certs/tunnel.crt"
+  tls_key: "/etc/underleaf/certs/tunnel.key"
+  handshake_timeout: "10s"
+  max_connections_per_node: 10
+  max_total_connections: 1000
+
+auth:
+  auth_domain: "your-tenant.us.auth0.com"
+  auth_audience: "https://your-api-identifier"
+  username: "your-m2m-client-name"
+  password: "your-m2m-client-secret"
+
+rate_limiting:
+  enabled: true
+  requests_per_minute: 60
+  burst: 20
+
+leases:
+  max_per_org: 100
+  max_ttl_seconds: 86400
+
+admin_socket:
+  enabled: true
+  socket_path: "/tmp/hyphae_admin.sock"

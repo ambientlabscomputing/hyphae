@@ -59,6 +59,17 @@ docker-publish-dev:
 	docker build -t ambientlabsjose/hyphae:develop . && \
 	docker push ambientlabsjose/hyphae:develop
 
+TAG ?=
+.PHONY: docker-publish-tag
+docker-publish-tag:
+	@if [ -z "$(TAG)" ]; then \
+		echo "Error: TAG is required. Usage: make docker-publish-tag TAG=v1.2.3" >&2; \
+		exit 1; \
+	fi
+	docker build -t ambientlabsjose/hyphae:$(TAG) . && \
+	docker push ambientlabsjose/hyphae:$(TAG)
+	@echo "Published ambientlabsjose/hyphae:$(TAG)"
+
 .PHONY: tidy
 tidy:
 	go mod tidy

@@ -1,5 +1,5 @@
 # VM name file written by run-vm.sh; specific to the local machine
 .vm-name
 
-# Tunnel certs staged into the payload by copy-payload.sh at deploy time
-payload/hyphae-devops/hyphae/certs/*
+# Local secrets file (copy .env.example → .env and fill in values)
+payload/hyphae-devops/.env

@@ -17,24 +17,42 @@ echo "Deploying on OrbStack VM: $VM_NAME"
 VM_DEST_PATH="/home/$USER/hyphae-devops"
 SSH_CMD="ssh -o StrictHostKeyChecking=no $VM_NAME@orb"
 
-# --- Bootstrap build-essential (provides make + gcc + other tools) ---
-# This must run before `make setup` since make itself may not be present.
-echo "Installing build-essential on VM..."
-$SSH_CMD "sudo apt-get update -qq && sudo apt-get install -y -qq build-essential"
+# --- Bootstrap make + envsubst on the VM ---
+# Runs install-make.sh directly via bash (make may not yet be present).
+# This is the only apt-get call made by the host — all subsequent installs
+# are delegated to the VM-side payload scripts via 'make setup'.
+echo "Bootstrapping make and envsubst on VM..."
+$SSH_CMD "bash $VM_DEST_PATH/scripts/install-make.sh"
+
+# --- Determine image mode from payload .env ---
+ENV_FILE="$DEVOPS_DIR/payload/hyphae-devops/.env"
+IMAGE_MODE="develop"
+if [ -f "$ENV_FILE" ]; then
+    # Extract HYPHAE_IMAGE_MODE without sourcing the whole file (avoids side-effects)
+    IMAGE_MODE="$(grep -E '^HYPHAE_IMAGE_MODE=' "$ENV_FILE" | cut -d= -f2- | tr -d "\"' \\\\" | head -1)"
+    IMAGE_MODE="${IMAGE_MODE:-develop}"
+fi
+echo "Image mode: $IMAGE_MODE"
 
 # --- Run payload setup and start services ---
-# setup and run are intentionally split into two SSH calls.
+# setup and run are intentionally split into two SSH sessions.
 # install-docker.sh adds the user to the docker group; that group membership
-# only takes effect in a new login session, so we open a fresh SSH connection
-# for the `make run` (docker compose up) step.
+# only takes effect in a new login session, so we open a fresh connection
+# for the service-start step.
 echo "Running payload setup on VM..."
 $SSH_CMD "cd $VM_DEST_PATH && make setup"
 
 echo "Starting hyphae services (new SSH session so docker group is active)..."
-ssh -o StrictHostKeyChecking=no "$VM_NAME@orb" "cd $VM_DEST_PATH && make run"
+if [ "$IMAGE_MODE" = "local" ]; then
+    echo "  → local build mode: building image from /mnt/mac source"
+    ssh -o StrictHostKeyChecking=no "$VM_NAME@orb" "cd $VM_DEST_PATH && make run-local"
+else
+    echo "  → remote image mode: pulling $IMAGE_MODE from Docker Hub"
+    ssh -o StrictHostKeyChecking=no "$VM_NAME@orb" "cd $VM_DEST_PATH && make run"
+fi
 
 echo ""
 echo "Deployment complete. To verify:"
-echo "  ssh $VM_NAME@orb 'docker ps'"
-echo "  ssh $VM_NAME@orb 'curl -s http://localhost:8084/health'"
-echo "  ssh $VM_NAME@orb \"cd $VM_DEST_PATH && make health\""
+echo "  make -C $(dirname $DEVOPS_DIR)/devops ssh         # open shell in VM"
+echo "  make -C $(dirname $DEVOPS_DIR)/devops status      # docker ps"
+echo "  make -C $(dirname $DEVOPS_DIR)/devops health      # hyphctl health"

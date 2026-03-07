@@ -10,7 +10,7 @@ VM_NAME_FILE="$DEVOPS_DIR/.vm-name"
 if [ ! -f "$VM_NAME_FILE" ]; then
     echo "Error: VM name file not found at $VM_NAME_FILE"
     echo "No VM to destroy."
-    exit 1
+    exit 0
 fi
 
 # Read the VM name

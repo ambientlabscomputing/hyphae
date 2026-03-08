@@ -1,0 +1,26 @@
+name: Tag SDK Submodule
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+jobs:
+  tag-sdk:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Create and push sdk/* tag
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          SDK_TAG="sdk/${VERSION}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag "${SDK_TAG}"
+          git push origin "${SDK_TAG}"

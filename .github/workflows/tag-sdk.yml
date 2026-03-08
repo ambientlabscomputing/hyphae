@@ -3,7 +3,7 @@ name: Tag SDK Submodule
 on:
   push:
     tags:
-      - 'v*.*.*'
+      - '*'
 
 jobs:
   tag-sdk:

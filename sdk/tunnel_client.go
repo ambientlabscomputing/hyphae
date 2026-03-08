@@ -148,13 +148,26 @@ func (c *TunnelClient) Session() *yamux.Session {
 // for leaseID, and establishes the yamux client session. It blocks until the
 // session is ready or an error occurs.
 //
+// Connect may only be called once per TunnelClient. Calling it again after a
+// successful connect returns an error — create a new TunnelClient instead.
+//
 // If AutoReconnect is enabled, a supervisor goroutine is started that
 // re-establishes the tunnel automatically whenever the session is lost.
 func (c *TunnelClient) Connect(ctx context.Context, leaseID string) error {
 	if leaseID == "" {
 		return fmt.Errorf("%w: leaseID is required", ErrInvalidConfig)
 	}
-	c.leaseID = leaseID
+
+	// Guard against double-connect: if a session already exists this client
+	// is already connected (or in the middle of reconnecting). Each client
+	// must be used for exactly one lease — create a new one for a new lease.
+	c.mu.Lock()
+	if c.session != nil {
+		c.mu.Unlock()
+		return fmt.Errorf("hyphae sdk: already connected; call Close() before reconnecting")
+	}
+	c.leaseID = leaseID // write under mutex — read by supervisor/reconnect goroutines
+	c.mu.Unlock()
 
 	if err := c.doConnect(ctx); err != nil {
 		return err
@@ -169,33 +182,65 @@ func (c *TunnelClient) Connect(ctx context.Context, leaseID string) error {
 
 // Forward accepts yamux streams opened by Hyphae's proxy (one per inbound
 // HTTP request) and pipes each stream to localAddr (e.g. "localhost:8080").
-// It blocks until ctx is cancelled, Close() is called, or the session closes.
+// It blocks until ctx is cancelled or Close() is called.
 //
-// Each accepted stream is handled in its own goroutine for parallelism.
+// When AutoReconnect is enabled and the session dies, Forward waits for the
+// supervisor to re-establish the connection and then resumes accepting streams
+// on the new session — so it never exits on a transient session failure.
 func (c *TunnelClient) Forward(ctx context.Context, localAddr string) error {
 	for {
 		stream, err := c.AcceptStream(ctx)
 		if err != nil {
-			// Distinguishing clean shutdown from errors.
 			select {
 			case <-ctx.Done():
 				return nil
 			case <-c.ctx.Done():
 				return nil
 			default:
+				// Session died. If AutoReconnect is on, wait for the supervisor
+				// to establish a new session then continue the accept loop.
+				if c.cfg.AutoReconnect {
+					if reconnErr := c.waitForReconnect(ctx); reconnErr != nil {
+						return nil // client is shutting down
+					}
+					continue
+				}
 				return err
 			}
 		}
 
+		c.mu.Lock()
+		leaseID := c.leaseID
+		c.mu.Unlock()
+
 		c.emit(TunnelEvent{
 			Type:      EventStreamOpened,
-			LeaseID:   c.leaseID,
+			LeaseID:   leaseID,
 			Timestamp: time.Now(),
 			Detail:    localAddr,
 		})
 
 		c.wg.Add(1)
 		go c.forwardStream(stream, localAddr)
+	}
+}
+
+// waitForReconnect blocks until the client is reconnected (connected.Load()
+// becomes true) or the caller's context / client context is cancelled.
+func (c *TunnelClient) waitForReconnect(ctx context.Context) error {
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-c.ctx.Done():
+			return ErrSessionClosed
+		case <-ticker.C:
+			if c.connected.Load() {
+				return nil
+			}
+		}
 	}
 }
 
@@ -327,7 +372,8 @@ func (c *TunnelClient) doConnect(ctx context.Context) error {
 	}
 
 	c.mu.Lock()
-	// Close any stale session/connection from a previous connect cycle.
+	// Close any stale session/connection from a previous connect cycle
+	// (supervisor-triggered reconnect).  On the first connect c.session is nil.
 	if c.session != nil {
 		c.session.Close() //nolint:errcheck
 	}
@@ -339,9 +385,12 @@ func (c *TunnelClient) doConnect(ctx context.Context) error {
 	c.mu.Unlock()
 
 	c.connected.Store(true)
+	c.mu.Lock()
+	leaseID := c.leaseID
+	c.mu.Unlock()
 	c.emit(TunnelEvent{
 		Type:      EventConnected,
-		LeaseID:   c.leaseID,
+		LeaseID:   leaseID,
 		Timestamp: time.Now(),
 		Detail:    c.cfg.HyphaeAddr,
 	})

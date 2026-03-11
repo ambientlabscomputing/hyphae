@@ -34,6 +34,7 @@ import (
 	"crypto/x509"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -524,6 +525,14 @@ func (c *TunnelClient) sendErr(err error) {
 func buildTLSConfig(cfg TunnelClientConfig) (*tls.Config, error) {
 	if cfg.TLSConfig != nil {
 		return cfg.TLSConfig, nil
+	}
+
+	// DEPRECATED: file-based TLS config is the fallback path. Clients should pass a bootstrapped
+	// *tls.Config via TunnelClientConfig.TLSConfig instead. This path remains as an escape hatch
+	// for disaster recovery but should not be relied upon in normal operation.
+	if cfg.CACertPath != "" || cfg.ClientCertPath != "" {
+		slog.Default().Warn("[DEPRECATED] hyphae sdk: using file-based TLS config; prefer bootstrapped TLSConfig via IssueLocalCertificate",
+			"ca_cert_path", cfg.CACertPath, "client_cert_path", cfg.ClientCertPath)
 	}
 
 	tlsCfg := &tls.Config{

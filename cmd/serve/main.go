@@ -3,7 +3,9 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -11,6 +13,7 @@ import (
 	"time"
 
 	"github.com/ambientlabscomputing/hyphae/internal/admin_server"
+	"github.com/ambientlabscomputing/hyphae/internal/bootstrap"
 	"github.com/ambientlabscomputing/hyphae/internal/proxy"
 	"github.com/ambientlabscomputing/hyphae/internal/repository"
 	"github.com/ambientlabscomputing/hyphae/internal/router"
@@ -51,15 +54,28 @@ func main() {
 	}
 	appRouter := router.NewAppRouter(svc, settings, ctx)
 
+	// Bootstrap TLS cert if configured.
+	var certMgr *bootstrap.CertManager
+	if settings.Bootstrap.CertCN != "" {
+		logger.Info("cert bootstrap enabled", "cert_cn", settings.Bootstrap.CertCN)
+		certMgr = runBootstrap(ctx, settings, logger)
+	}
+
 	tunnelSrv := tunnel.NewTunnelServer(tunnel.Config{
 		Port:                  settings.Tunnel.Port,
 		CACert:                settings.Tunnel.CACert,
 		TLSCert:               settings.Tunnel.TLSCert,
 		TLSKey:                settings.Tunnel.TLSKey,
+		GetCertificate:        certMgrGetCertificate(certMgr),
 		HandshakeTimeout:      settings.TunnelHandshakeTimeout(),
 		MaxConnectionsPerNode: settings.Tunnel.MaxConnectionsPerNode,
 		MaxTotalConnections:   settings.Tunnel.MaxTotalConnections,
 	}, svc)
+
+	// Start certificate renewal loop (no-op if bootstrap was not configured).
+	if certMgr != nil {
+		go bootstrap.RunRenewalLoop(ctx, settings, certMgr, logger)
+	}
 
 	proxySrv := proxy.NewProxyServer(proxy.Config{
 		Port:           settings.PublicGateway.Port,
@@ -131,4 +147,69 @@ func main() {
 	case <-time.After(5 * time.Second):
 		logger.Info("Hyphae stopped cleanly")
 	}
+}
+
+// runBootstrap fetches the CA cert and ensures the hyphae TLS cert is valid,
+// retrying with exponential backoff (5 attempts, 2s initial). Exits the process
+// if all attempts fail — the cert is required for the tunnel server to start.
+// Returns a *bootstrap.CertManager holding the live cert for hot-swap renewal.
+func runBootstrap(ctx context.Context, settings *utils.Settings, logger *slog.Logger) *bootstrap.CertManager {
+	const maxAttempts = 5
+
+	// Step 1: Fetch CA cert from server_api (public endpoint, no auth).
+	backoff := 2 * time.Second
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		if err := bootstrap.EnsureCACert(ctx, settings); err == nil {
+			break
+		} else {
+			logger.Error("CA cert fetch failed", "attempt", attempt, "max", maxAttempts, "backoff", backoff, "error", err)
+			if attempt == maxAttempts {
+				logger.Error("CA cert bootstrap failed after all attempts")
+				os.Exit(1)
+			}
+			select {
+			case <-ctx.Done():
+				logger.Error("context cancelled during CA cert bootstrap")
+				os.Exit(1)
+			case <-time.After(backoff):
+			}
+			backoff *= 2
+		}
+	}
+	logger.Info("CA cert fetched from server_api")
+
+	// Step 2: Ensure our own TLS cert (CSR flow if absent or expiring).
+	backoff = 2 * time.Second
+	var cert tls.Certificate
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		var err error
+		cert, err = bootstrap.EnsureCert(ctx, settings)
+		if err == nil {
+			logger.Info("TLS cert bootstrapped", "cert_cn", settings.Bootstrap.CertCN)
+			return bootstrap.NewCertManager(cert)
+		}
+		logger.Error("hyphae cert bootstrap failed", "attempt", attempt, "max", maxAttempts, "backoff", backoff, "error", err)
+		if attempt == maxAttempts {
+			logger.Error("hyphae cert bootstrap failed after all attempts")
+			os.Exit(1)
+		}
+		select {
+		case <-ctx.Done():
+			logger.Error("context cancelled during cert bootstrap")
+			os.Exit(1)
+		case <-time.After(backoff):
+		}
+		backoff *= 2
+	}
+	// Unreachable — loop always returns or calls os.Exit, but compiler needs it.
+	return bootstrap.NewCertManager(cert)
+}
+
+// certMgrGetCertificate returns the CertManager's GetCertificate callback when
+// the manager is non-nil, or nil when bootstrap was not configured.
+func certMgrGetCertificate(mgr *bootstrap.CertManager) func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
+	if mgr == nil {
+		return nil
+	}
+	return mgr.GetCertificate
 }

@@ -33,6 +33,7 @@ type Server struct {
 	caCert                string
 	tlsCert               string
 	tlsKey                string
+	getCertificate        func(*tls.ClientHelloInfo) (*tls.Certificate, error) // non-nil when hot-swap is active
 	handshakeTimeout      time.Duration
 	maxConnectionsPerNode int
 	svc                   service.Service
@@ -48,10 +49,14 @@ type Server struct {
 
 // Config holds the minimal settings the tunnel server needs.
 type Config struct {
-	Port                  string        // e.g. "9090"
-	CACert                string        // path to platform CA PEM file (file path only)
-	TLSCert               string        // path to tunnel server certificate PEM file
-	TLSKey                string        // path to tunnel server private key PEM file
+	Port    string // e.g. "9090"
+	CACert  string // path to platform CA PEM file (file path only)
+	TLSCert string // path to tunnel server certificate PEM file
+	TLSKey  string // path to tunnel server private key PEM file
+	// GetCertificate, when non-nil, is wired into tls.Config.GetCertificate so
+	// that cert renewals from the bootstrap renewal loop take effect without
+	// restarting the listener. Use bootstrap.CertManager.GetCertificate here.
+	GetCertificate        func(*tls.ClientHelloInfo) (*tls.Certificate, error)
 	HandshakeTimeout      time.Duration // deadline for TLS + HTTP upgrade; 0 = 10s default
 	MaxConnectionsPerNode int           // per-node limit; 0 = 10 default
 	MaxTotalConnections   int           // total session limit; 0 = 1000 default
@@ -71,6 +76,7 @@ func NewTunnelServer(cfg Config, svc service.Service) *Server {
 		caCert:                cfg.CACert,
 		tlsCert:               cfg.TLSCert,
 		tlsKey:                cfg.TLSKey,
+		getCertificate:        cfg.GetCertificate,
 		handshakeTimeout:      cfg.HandshakeTimeout,
 		maxConnectionsPerNode: cfg.MaxConnectionsPerNode,
 		svc:                   svc,
@@ -140,6 +146,16 @@ func (s *Server) buildTLSConfig() (*tls.Config, error) {
 
 	// Load server certificate and key
 	var serverCerts []tls.Certificate
+	if s.getCertificate != nil {
+		// Hot-swap path: delegate cert selection to CertManager so that renewals
+		// from RunRenewalLoop take effect without restarting the tunnel listener.
+		return &tls.Config{
+			GetCertificate: s.getCertificate,
+			ClientAuth:     tls.RequireAndVerifyClientCert,
+			ClientCAs:      pool,
+			MinVersion:     tls.VersionTLS13,
+		}, nil
+	}
 	if s.tlsCert != "" && s.tlsKey != "" {
 		cert, err := tls.LoadX509KeyPair(s.tlsCert, s.tlsKey)
 		if err != nil {

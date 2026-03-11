@@ -1,7 +1,9 @@
 package sdk
 
 import (
+	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"net/http"
 	"time"
@@ -34,6 +36,14 @@ type TunnelClientConfig struct {
 	// is responsible for a complete TLS configuration (including client cert
 	// and CA pool). Primarily used in tests.
 	TLSConfig *tls.Config
+
+	// CACertRefresher is an optional callback invoked by doConnect when a TLS
+	// certificate verification error is encountered. It should return a fresh
+	// *x509.CertPool built from the current platform CA certificate. When set,
+	// doConnect will update its RootCAs and retry the dial once, which allows
+	// the MMA to self-heal after the server_api CA is regenerated without
+	// requiring a restart.
+	CACertRefresher func(ctx context.Context) (*x509.CertPool, error)
 
 	// AutoReconnect enables the supervisor goroutine that re-dials Hyphae
 	// with exponential backoff whenever the session is lost.

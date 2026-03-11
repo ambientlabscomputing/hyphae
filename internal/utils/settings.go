@@ -75,6 +75,29 @@ type Settings struct {
 		Enabled    bool   `yaml:"enabled"`
 		SocketPath string `yaml:"socket_path"`
 	} `yaml:"admin_socket"`
+
+	// ServerAPI describes the upstream server_api instance used for cert operations.
+	ServerAPI struct {
+		BaseURL string `yaml:"base_url"` // e.g. "http://localhost:8082/api/v1/servers"
+	} `yaml:"server_api"`
+
+	// Bootstrap controls automatic TLS certificate provisioning via server_api.
+	// When CertCN is non-empty, Hyphae fetches its own tunnel TLS cert from
+	// server_api on startup using an M2M token, and renews it before expiry.
+	// Leave CertCN empty to use pre-staged disk certs.
+	Bootstrap struct {
+		CertCN          string   `yaml:"cert_cn"`
+		CertDNSNames    []string `yaml:"cert_dns_names"`
+		RenewBeforeDays int      `yaml:"renew_before_days"`
+		M2M             struct {
+			ClientID     string       `yaml:"client_id"`
+			ClientSecret SecretString `yaml:"client_secret"` // for client_credentials grant
+			Username     string       `yaml:"username"`      // for password grant
+			Password     SecretString `yaml:"password"`      // for password grant
+			TokenURL     string       `yaml:"token_url"`
+			Audience     string       `yaml:"audience"`
+		} `yaml:"m2m"`
+	} `yaml:"bootstrap"`
 }
 
 var defaults = map[string]interface{}{

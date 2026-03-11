@@ -32,12 +32,14 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -323,7 +325,38 @@ func (c *TunnelClient) doConnect(ctx context.Context) error {
 		Timeout: 15 * time.Second,
 	}, "tcp", c.cfg.HyphaeAddr, c.tlsCfg)
 	if err != nil {
-		return fmt.Errorf("hyphae sdk: dial %s: %w", c.cfg.HyphaeAddr, err)
+		// On a certificate verification failure, try to self-heal by refreshing
+		// the CA pool if the caller provided a refresher (e.g. MMA kernel fetch).
+		// This handles the case where server_api's CA was regenerated after the
+		// MMA started and the stale CA pool can no longer verify Hyphae's cert.
+		if c.cfg.CACertRefresher != nil && isCertVerificationError(err) {
+			slog.Default().Warn("hyphae sdk: TLS verify failed; refreshing CA pool and retrying once",
+				"addr", c.cfg.HyphaeAddr, "error", err)
+			if freshPool, refreshErr := c.cfg.CACertRefresher(ctx); refreshErr == nil && freshPool != nil {
+				refreshedCfg := c.tlsCfg.Clone()
+				refreshedCfg.RootCAs = freshPool
+				conn2, retryErr := tls.DialWithDialer(&net.Dialer{
+					Timeout: 15 * time.Second,
+				}, "tcp", c.cfg.HyphaeAddr, refreshedCfg)
+				if retryErr == nil {
+					// Persist the refreshed config so future reconnects also use it.
+					c.mu.Lock()
+					c.tlsCfg = refreshedCfg
+					c.mu.Unlock()
+					conn = conn2
+					err = nil
+				} else {
+					slog.Default().Error("hyphae sdk: CA refresh retry also failed",
+						"addr", c.cfg.HyphaeAddr, "error", retryErr)
+					// Fall through and return the original error below.
+				}
+			} else if refreshErr != nil {
+				slog.Default().Error("hyphae sdk: CACertRefresher failed", "error", refreshErr)
+			}
+		}
+		if err != nil {
+			return fmt.Errorf("hyphae sdk: dial %s: %w", c.cfg.HyphaeAddr, err)
+		}
 	}
 
 	// Send the HTTP/1.1 Upgrade request.
@@ -573,4 +606,27 @@ func buildTLSConfig(cfg TunnelClientConfig) (*tls.Config, error) {
 	}
 
 	return tlsCfg, nil
+}
+
+// isCertVerificationError returns true when err is (or wraps) an x509
+// certificate verification failure. Used by doConnect to decide whether a
+// CA-pool refresh + retry is worth attempting.
+func isCertVerificationError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var unknownAuthority x509.UnknownAuthorityError
+	if errors.As(err, &unknownAuthority) {
+		return true
+	}
+	var certInvalid x509.CertificateInvalidError
+	if errors.As(err, &certInvalid) {
+		return true
+	}
+	// Catch TLS alert 42 (bad_certificate) and alert 48 (unknown_ca) which are
+	// surfaced as plain strings in the error chain on some Go versions.
+	msg := err.Error()
+	return strings.Contains(msg, "x509:") ||
+		strings.Contains(msg, "certificate signed by unknown authority") ||
+		strings.Contains(msg, "tls: failed to verify")
 }

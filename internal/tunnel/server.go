@@ -13,6 +13,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -26,6 +27,16 @@ import (
 )
 
 const upgradeHeader = "tunnel"
+
+// bufferedRWC wraps a connection so that any bytes over-read by a bufio.Reader
+// during the HTTP upgrade phase are replayed before reading from the raw conn.
+type bufferedRWC struct {
+	io.Reader // MultiReader draining buffered bytes, then raw conn
+	conn      io.WriteCloser
+}
+
+func (b *bufferedRWC) Write(p []byte) (int, error) { return b.conn.Write(p) }
+func (b *bufferedRWC) Close() error                { return b.conn.Close() }
 
 // Server is the mTLS tunnel listener.
 type Server struct {
@@ -297,9 +308,19 @@ func (s *Server) handleConn(ctx context.Context, rawConn net.Conn) {
 
 	// Wrap the upgraded connection in a yamux server session.
 	// MMA's side calls yamux.Client after receiving the 101.
+	//
+	// IMPORTANT: Use br (the bufio.Reader) instead of tlsConn directly.
+	// http.ReadRequest may have buffered bytes beyond the HTTP headers
+	// (e.g. if the client pipelined data in the same TLS record).
+	// Passing tlsConn would silently lose those bytes, corrupting the
+	// yamux stream and causing immediate session shutdown.
 	yamuxCfg := yamux.DefaultConfig()
 	yamuxCfg.KeepAliveInterval = 30 * time.Second
-	session, err := yamux.Server(tlsConn, yamuxCfg)
+	var yamuxIO io.ReadWriteCloser = tlsConn
+	if br.Buffered() > 0 {
+		yamuxIO = &bufferedRWC{Reader: io.MultiReader(br, tlsConn), conn: tlsConn}
+	}
+	session, err := yamux.Server(yamuxIO, yamuxCfg)
 	if err != nil {
 		logger.Error("Tunnel: yamux.Server failed", "lease_id", leaseID, "error", err)
 		writeHTTPError(tlsConn, http.StatusInternalServerError, "mux init failed")

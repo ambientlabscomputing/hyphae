@@ -46,13 +46,15 @@ build-local:
 
 ## Start hyphae from Docker Hub image (HYPHAE_IMAGE_MODE=develop or v*).
 run:
-	@docker compose up -d hyphae
+	@./scripts/refresh-tunnel-certs.sh
+	@docker compose up -d --force-recreate hyphae
 
 ## Build from source then start hyphae (HYPHAE_IMAGE_MODE=local).
 run-local: build-local
+	@./scripts/refresh-tunnel-certs.sh
 	@IMAGE_TAG="$$(cat .local-image-tag)"; \
 	 echo "Starting hyphae with locally-built image: ambientlabsjose/hyphae:$$IMAGE_TAG"; \
-	 HYPHAE_IMAGE_TAG="$$IMAGE_TAG" docker compose up -d hyphae
+	 HYPHAE_IMAGE_TAG="$$IMAGE_TAG" docker compose up -d --force-recreate hyphae
 
 ## Start hyphae + Cloudflare tunnel (requires CF_TUNNEL_TOKEN in .env).
 run-with-tunnel:
@@ -64,6 +66,7 @@ stop:
 ## Rebuild: mode-aware. local → rebuild from source; remote → pull from Hub.
 rebuild:
 	@set -a; . ./.env; set +a; \
+	./scripts/refresh-tunnel-certs.sh; \
 	if [ "$${HYPHAE_IMAGE_MODE:-develop}" = "local" ]; then \
 		./scripts/build-local.sh; \
 		IMAGE_TAG="$$(cat .local-image-tag)"; \

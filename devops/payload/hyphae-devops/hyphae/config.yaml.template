@@ -56,6 +56,26 @@ leases:
   max_per_org: 100         # max active leases per org_id (0 = default 100)
   max_ttl_seconds: 86400   # maximum allowed TTL in seconds (0 = default 86400 = 24h)
 
+# server_api connection (used for cert bootstrap)
+server_api:
+  base_url: "http://host.docker.internal:8082/api/v1/servers"
+
+# Automatic TLS cert bootstrap from server_api.
+# When cert_cn is set, Hyphae fetches its CA + tunnel cert on startup
+# and renews before expiry. No pre-staged certs needed.
+bootstrap:
+  cert_cn: "hyphae-tunnel"
+  cert_dns_names:
+    - "hyphae-tunnel"
+    - "hyphae-host.orb.local"
+  renew_before_days: 7
+  m2m:
+    username: "${AUTH0_USERNAME}"
+    password: "${AUTH0_PASSWORD}"
+    token_url: "https://dev-motk8gx6wyw7nmbr.us.auth0.com/oauth/token"
+    audience: "https://ambientdev.com/v1/api"
+    client_id: "K2uL4qc4cRWFHDFrHGaVtex8SbMoHf8h"
+
 # Admin Unix socket (used by hyphctl)
 admin_socket:
   enabled: true

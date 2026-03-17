@@ -20,8 +20,8 @@ if [ -f "$VM_NAME_FILE" ]; then
     exit 1
 fi
 
-# create random name to avoid collisions with existing VMs
-VM_NAME="hyphae-host-$RANDOM"
+# Use a fixed name so the local Hyphae endpoint is stable across restarts.
+VM_NAME="hyphae-host"
 
 echo "Creating OrbStack VM: $VM_NAME"
 orb create ubuntu $VM_NAME

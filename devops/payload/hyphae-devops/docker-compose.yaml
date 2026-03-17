@@ -24,8 +24,9 @@ services:
             - ./hyphae/config.yaml:/etc/underleaf/config.yaml:ro
             # Certs are mounted directly from the Mac via OrbStack's /mnt/mac FUSE mount.
             # Set HYPHAE_CERTS_PATH in .env (e.g. /mnt/mac/Users/you/.../hyphae/certs).
-            # This means certs only need to be created once on the Mac — no copying needed.
-            - ${HYPHAE_CERTS_PATH}:/etc/underleaf/certs:ro
+            # This mount must stay writable in local dev because Hyphae bootstraps
+            # ca.crt, tunnel.crt, and tunnel.key on startup.
+            - ${HYPHAE_CERTS_PATH}:/etc/underleaf/certs
             # Log directory bind-mounted from Mac via /mnt/mac so logs persist and are
             # directly readable on the host without ssh-ing into the VM.
             # config.yaml.template writes to /var/log/underleaf/hyphae.log (container path).

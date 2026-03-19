@@ -70,6 +70,14 @@ type Settings struct {
 		MaxTTLSeconds int64 `yaml:"max_ttl_seconds"` // 0 = 86400 (default)
 	} `yaml:"leases"`
 
+	// Channels configures the transparent TCP relay feature (UNDF-111).
+	// Disabled by default — set enabled: true to activate.
+	Channels struct {
+		Enabled            bool   `yaml:"enabled"`               // default: false
+		GrantVerifyKeyPath string `yaml:"grant_verify_key_path"` // path to server_api ES256 public key PEM
+		MaxIdleSeconds     int    `yaml:"max_idle_seconds"`      // 0 = 60 (default)
+	} `yaml:"channels"`
+
 	// Admin Unix socket (hyphctl)
 	AdminSocket struct {
 		Enabled    bool   `yaml:"enabled"`
@@ -213,6 +221,13 @@ func (s *Settings) Validate() error {
 	}
 	if s.Leases.MaxTTLSeconds == 0 {
 		s.Leases.MaxTTLSeconds = 86400
+	}
+
+	// Channel defaults (only applied when feature is enabled)
+	if s.Channels.Enabled {
+		if s.Channels.MaxIdleSeconds == 0 {
+			s.Channels.MaxIdleSeconds = 60
+		}
 	}
 
 	// Validate all duration strings are parseable

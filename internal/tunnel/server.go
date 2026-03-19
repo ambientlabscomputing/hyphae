@@ -49,6 +49,10 @@ type Server struct {
 	maxConnectionsPerNode int
 	svc                   service.Service
 
+	// Channel relay fields (UNDF-111)
+	channelsEnabled bool
+	channelIdleSec  int
+
 	// totalSem is a counting semaphore that caps the total number of concurrent
 	// tunnel sessions. nil means no limit.
 	totalSem chan struct{}
@@ -71,17 +75,25 @@ type Config struct {
 	HandshakeTimeout      time.Duration // deadline for TLS + HTTP upgrade; 0 = 10s default
 	MaxConnectionsPerNode int           // per-node limit; 0 = 10 default
 	MaxTotalConnections   int           // total session limit; 0 = 1000 default
+
+	// Channel relay (UNDF-111). When false, X-Channel-ID and
+	// X-Listener-Register connections are rejected with 501.
+	ChannelsEnabled    bool
+	ChannelIdleSeconds int // idle splice timeout in seconds; 0 = 300 default
 }
 
 // NewTunnelServer creates a tunnel listener.
 func NewTunnelServer(cfg Config, svc service.Service) *Server {
 	if cfg.HandshakeTimeout == 0 {
-		cfg.HandshakeTimeout = 10 * time.Second
+		cfg.HandshakeTimeout = 120 * time.Second
 	}
 	if cfg.MaxConnectionsPerNode == 0 {
 		cfg.MaxConnectionsPerNode = 10
 	}
 
+	if cfg.ChannelIdleSeconds == 0 {
+		cfg.ChannelIdleSeconds = 300
+	}
 	s := &Server{
 		port:                  cfg.Port,
 		caCert:                cfg.CACert,
@@ -91,6 +103,8 @@ func NewTunnelServer(cfg Config, svc service.Service) *Server {
 		handshakeTimeout:      cfg.HandshakeTimeout,
 		maxConnectionsPerNode: cfg.MaxConnectionsPerNode,
 		svc:                   svc,
+		channelsEnabled:       cfg.ChannelsEnabled,
+		channelIdleSec:        cfg.ChannelIdleSeconds,
 	}
 	if cfg.MaxTotalConnections > 0 {
 		s.totalSem = make(chan struct{}, cfg.MaxTotalConnections)
@@ -258,15 +272,47 @@ func (s *Server) handleConn(ctx context.Context, rawConn net.Conn) {
 		return
 	}
 
-	leaseID := req.Header.Get("X-Lease-ID")
-	if leaseID == "" {
-		writeHTTPError(tlsConn, http.StatusBadRequest, "missing X-Lease-ID header")
+	if req.Header.Get("Upgrade") != upgradeHeader {
+		writeHTTPError(tlsConn, http.StatusUpgradeRequired, "must upgrade to tunnel")
 		rawConn.Close()
 		return
 	}
 
-	if req.Header.Get("Upgrade") != upgradeHeader {
-		writeHTTPError(tlsConn, http.StatusUpgradeRequired, "must upgrade to tunnel")
+	// Handshake + HTTP upgrade is complete — clear the deadline for all paths.
+	if err := tlsConn.SetDeadline(time.Time{}); err != nil {
+		logger.Warn("Tunnel: failed to clear handshake deadline", "error", err)
+		rawConn.Close()
+		return
+	}
+
+	leaseID := req.Header.Get("X-Lease-ID")
+	channelID := req.Header.Get("X-Channel-ID")
+	listenerReg := req.Header.Get("X-Listener-Register")
+
+	// ── Channel relay routing (UNDF-111) ──────────────────────────────────────
+	if channelID != "" {
+		if !s.channelsEnabled {
+			writeHTTPError(tlsConn, http.StatusNotImplemented, "channels not enabled")
+			rawConn.Close()
+			return
+		}
+		grantToken := req.Header.Get("X-Channel-Grant")
+		s.handleChannelConn(ctx, tlsConn, nodeServerID, channelID, grantToken, br)
+		return
+	}
+	if listenerReg == "true" {
+		if !s.channelsEnabled {
+			writeHTTPError(tlsConn, http.StatusNotImplemented, "channels not enabled")
+			rawConn.Close()
+			return
+		}
+		orgID := req.Header.Get("X-Org-ID")
+		s.handleListenerConn(ctx, tlsConn, nodeServerID, orgID, br)
+		return
+	}
+
+	if leaseID == "" {
+		writeHTTPError(tlsConn, http.StatusBadRequest, "missing X-Lease-ID, X-Channel-ID, or X-Listener-Register header")
 		rawConn.Close()
 		return
 	}
@@ -287,13 +333,6 @@ func (s *Server) handleConn(ctx context.Context, rawConn net.Conn) {
 			"lease_id", leaseID,
 		)
 		writeHTTPError(tlsConn, http.StatusForbidden, "node identity does not match lease")
-		rawConn.Close()
-		return
-	}
-
-	// Clear the deadline before long-lived yamux session begins.
-	if err := tlsConn.SetDeadline(time.Time{}); err != nil {
-		logger.Warn("Tunnel: failed to clear deadline", "error", err)
 		rawConn.Close()
 		return
 	}

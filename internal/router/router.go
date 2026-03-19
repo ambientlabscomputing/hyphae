@@ -53,6 +53,13 @@ func NewAppRouter(svc service.Service, settings *utils.Settings, appCtx context.
 	api.DELETE("/leases/:id", r.RevokeLeaseHandler)
 	api.GET("/connections", r.ListConnectionsHandler)
 
+	// Channel relay endpoints (UNDF-111)
+	api.POST("/channels", r.RegisterChannelHandler)
+	api.GET("/channels", r.ListChannelsHandler)
+	api.GET("/channels/:id", r.GetChannelHandler)
+	api.DELETE("/channels/:id", r.RevokeChannelHandler)
+	api.GET("/listeners", r.ListListenersHandler)
+
 	return r
 }
 

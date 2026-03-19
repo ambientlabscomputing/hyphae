@@ -83,3 +83,68 @@ type HealthResponse struct {
 	Leases      int    `json:"leases"`
 	Connections int    `json:"connections"`
 }
+
+// ── Channel types ─────────────────────────────────────────────────────────────
+
+// ChannelStatus describes the lifecycle state of a relay channel.
+type ChannelStatus string
+
+const (
+	ChannelStatusPending ChannelStatus = "pending" // issued, listener not yet connected
+	ChannelStatusReady   ChannelStatus = "ready"   // listener connected, awaiting initiator
+	ChannelStatusActive  ChannelStatus = "active"  // splice active, data flowing
+	ChannelStatusClosed  ChannelStatus = "closed"  // completed or expired
+	ChannelStatusError   ChannelStatus = "error"   // splice or auth failure
+)
+
+// Channel represents a relay channel between two agents.
+type Channel struct {
+	ChannelID      string        `json:"channel_id"`
+	OrgID          string        `json:"org_id"`
+	SourceServerID string        `json:"source_server_id"` // initiator
+	DestServerID   string        `json:"dest_server_id"`   // listener
+	Purpose        string        `json:"purpose"`
+	Status         ChannelStatus `json:"status"`
+	CreatedAt      time.Time     `json:"created_at"`
+	ExpiresAt      time.Time     `json:"expires_at"`
+	ActivatedAt    *time.Time    `json:"activated_at,omitempty"`
+	BytesRelayed   int64         `json:"bytes_relayed"`
+}
+
+// RegisterChannelRequest is the body server_api sends to POST /api/v1/channels.
+// server_api is the sole authority — hyphae only stores the record.
+type RegisterChannelRequest = Channel
+
+// RegisterChannelResponse is returned by POST /api/v1/channels.
+type RegisterChannelResponse struct {
+	Channel *Channel `json:"channel"`
+}
+
+// ListChannelsResponse wraps a slice of channels.
+type ListChannelsResponse struct {
+	Channels []*Channel `json:"channels"`
+	Count    int        `json:"count"`
+}
+
+// ChannelGrant holds the verified claims extracted from a channel grant JWT.
+type ChannelGrant struct {
+	ChannelID      string
+	OrgID          string
+	SourceServerID string
+	DestServerID   string
+	Purpose        string
+	Nonce          string
+}
+
+// ListenerRegistration represents an agent connected as a channel listener.
+type ListenerRegistration struct {
+	ServerID    string    `json:"server_id"`
+	OrgID       string    `json:"org_id"`
+	ConnectedAt time.Time `json:"connected_at"`
+}
+
+// ListListenersResponse wraps active listener registrations.
+type ListListenersResponse struct {
+	Listeners []*ListenerRegistration `json:"listeners"`
+	Count     int                     `json:"count"`
+}

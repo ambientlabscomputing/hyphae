@@ -16,7 +16,8 @@ func newSvc(t *testing.T) service.Service {
 	t.Helper()
 	ctx := context.Background()
 	repo := repository.NewRepository(ctx)
-	svc, err := service.NewService(ctx, repo, service.ServiceConfig{})
+	channelRepo := repository.NewChannelRepository(ctx)
+	svc, err := service.NewService(ctx, repo, channelRepo, service.ServiceConfig{})
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}

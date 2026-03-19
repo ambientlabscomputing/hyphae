@@ -97,6 +97,50 @@ func EnsureCACert(ctx context.Context, settings *utils.Settings) error {
 	return nil
 }
 
+// EnsureGrantVerifyKey fetches the token-signing public key from server_api's
+// public /tokens/public-key endpoint and writes it as PEM to keyPath. This is
+// the ES256 public key used to verify channel grant JWTs. The endpoint requires
+// no authentication (public keys are safe to expose).
+func EnsureGrantVerifyKey(ctx context.Context, settings *utils.Settings, keyPath string) error {
+	baseURL := strings.TrimRight(settings.ServerAPI.BaseURL, "/")
+	keyURL := baseURL + "/tokens/public-key?format=pem"
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, keyURL, nil)
+	if err != nil {
+		return fmt.Errorf("build grant verify key request: %w", err)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("fetch grant verify key from %s: %w", keyURL, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("grant verify key fetch returned %d: %s", resp.StatusCode, string(body))
+	}
+
+	var result struct {
+		PublicKey string `json:"public_key"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return fmt.Errorf("decode grant verify key response: %w", err)
+	}
+	if result.PublicKey == "" {
+		return fmt.Errorf("grant verify key response has empty public_key field")
+	}
+
+	if err := os.MkdirAll(filepath.Dir(keyPath), 0o700); err != nil {
+		return fmt.Errorf("create dir for grant verify key: %w", err)
+	}
+	if err := os.WriteFile(keyPath, []byte(result.PublicKey), 0o644); err != nil {
+		return fmt.Errorf("write grant verify key to %s: %w", keyPath, err)
+	}
+
+	return nil
+}
+
 // EnsureCert returns a valid TLS certificate for Hyphae. If the cert on disk is
 // absent or will expire within RenewBeforeDays, it fetches a fresh cert from
 // server_api via the service CSR endpoint and writes it to disk.

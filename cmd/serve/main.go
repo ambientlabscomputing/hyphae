@@ -3,12 +3,16 @@ package main
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"crypto/tls"
+	"crypto/x509"
+	"encoding/pem"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -38,10 +42,61 @@ func main() {
 	logger.Info("Starting hyphae", "version", version)
 
 	repo := repository.NewRepository(ctx)
+	channelRepo := repository.NewChannelRepository(ctx)
 
-	svc, err := service.NewService(ctx, repo, service.ServiceConfig{
-		MaxLeasesPerOrg: settings.Leases.MaxPerOrg,
-		MaxTTLSeconds:   settings.Leases.MaxTTLSeconds,
+	// Load channel grant verify key if the feature is enabled.
+	var channelGrantVerifyKey *ecdsa.PublicKey
+	if settings.Channels.Enabled {
+		keyPath := settings.Channels.GrantVerifyKeyPath
+		if keyPath == "" {
+			// Use the same certs directory as the CA cert (typically /etc/underleaf/certs/
+			// inside the container). Fall back to a relative path if ca_cert is unset.
+			certsDir := "certs"
+			if settings.Tunnel.CACert != "" {
+				certsDir = filepath.Dir(settings.Tunnel.CACert)
+			}
+			keyPath = filepath.Join(certsDir, "channel_grant_verify.pem")
+		}
+
+		// Auto-fetch the token-signing public key from server_api (same retry
+		// pattern as the CA cert bootstrap above).
+		const maxKeyAttempts = 5
+		keyBackoff := 2 * time.Second
+		for attempt := 1; attempt <= maxKeyAttempts; attempt++ {
+			if err := bootstrap.EnsureGrantVerifyKey(ctx, settings, keyPath); err == nil {
+				break
+			} else {
+				logger.Error("grant verify key fetch failed", "attempt", attempt, "max", maxKeyAttempts, "backoff", keyBackoff, "error", err)
+				if attempt == maxKeyAttempts {
+					logger.Error("grant verify key bootstrap failed after all attempts")
+					os.Exit(1)
+				}
+				select {
+				case <-ctx.Done():
+					logger.Error("context cancelled during grant verify key bootstrap")
+					os.Exit(1)
+				case <-time.After(keyBackoff):
+				}
+				keyBackoff *= 2
+			}
+		}
+		logger.Info("Grant verify key fetched from server_api", "path", keyPath)
+
+		key, err := loadChannelGrantVerifyKey(keyPath)
+		if err != nil {
+			logger.Error("Failed to load channel grant verify key", "error", err)
+			os.Exit(1)
+		}
+		channelGrantVerifyKey = key
+		logger.Info("Channel grant verify key loaded", "path", keyPath)
+	}
+
+	svc, err := service.NewService(ctx, repo, channelRepo, service.ServiceConfig{
+		MaxLeasesPerOrg:       settings.Leases.MaxPerOrg,
+		MaxTTLSeconds:         settings.Leases.MaxTTLSeconds,
+		ChannelsEnabled:       settings.Channels.Enabled,
+		ChannelGrantVerifyKey: channelGrantVerifyKey,
+		ChannelMaxIdleSeconds: settings.Channels.MaxIdleSeconds,
 	})
 	if err != nil {
 		logger.Error("Failed to create service", "error", err)
@@ -70,6 +125,8 @@ func main() {
 		HandshakeTimeout:      settings.TunnelHandshakeTimeout(),
 		MaxConnectionsPerNode: settings.Tunnel.MaxConnectionsPerNode,
 		MaxTotalConnections:   settings.Tunnel.MaxTotalConnections,
+		ChannelsEnabled:       settings.Channels.Enabled,
+		ChannelIdleSeconds:    settings.Channels.MaxIdleSeconds,
 	}, svc)
 
 	// Start certificate renewal loop (no-op if bootstrap was not configured).
@@ -212,4 +269,26 @@ func certMgrGetCertificate(mgr *bootstrap.CertManager) func(*tls.ClientHelloInfo
 		return nil
 	}
 	return mgr.GetCertificate
+}
+
+// loadChannelGrantVerifyKey reads an ECDSA P-256 public key from a PKIX PEM
+// file and returns it for verifying ES256 channel grant JWTs signed by server_api.
+func loadChannelGrantVerifyKey(path string) (*ecdsa.PublicKey, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read grant verify key %s: %w", path, err)
+	}
+	block, _ := pem.Decode(data)
+	if block == nil {
+		return nil, fmt.Errorf("no PEM block found in %s", path)
+	}
+	key, err := x509.ParsePKIXPublicKey(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("parse PKIX public key in %s: %w", path, err)
+	}
+	ecKey, ok := key.(*ecdsa.PublicKey)
+	if !ok {
+		return nil, fmt.Errorf("key in %s is not ECDSA (got %T)", path, key)
+	}
+	return ecKey, nil
 }

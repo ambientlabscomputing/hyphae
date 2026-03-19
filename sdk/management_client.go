@@ -73,6 +73,56 @@ func (m *ManagementClient) RevokeLease(ctx context.Context, leaseID string) erro
 	return nil
 }
 
+// ── Channel operations ────────────────────────────────────────────────────────
+
+// RegisterChannel calls POST /channels to store a pre-built channel on the
+// hyphae gateway. The channel is created and signed by server_api before being
+// forwarded to hyphae for relay-lookup.
+func (m *ManagementClient) RegisterChannel(ctx context.Context, ch *Channel) (*Channel, error) {
+	var out RegisterChannelResponse
+	if err := m.doJSON(ctx, http.MethodPost, "/channels", ch, &out); err != nil {
+		return nil, fmt.Errorf("RegisterChannel: %w", err)
+	}
+	return out.Channel, nil
+}
+
+// GetChannel calls GET /channels/:id and returns the Channel. Returns
+// ErrLeaseNotFound if the server responds with 404.
+func (m *ManagementClient) GetChannel(ctx context.Context, channelID string) (*Channel, error) {
+	var out Channel
+	if err := m.doJSON(ctx, http.MethodGet, "/channels/"+channelID, nil, &out); err != nil {
+		return nil, fmt.Errorf("GetChannel: %w", err)
+	}
+	return &out, nil
+}
+
+// ListChannels calls GET /channels and returns all known channels.
+func (m *ManagementClient) ListChannels(ctx context.Context) ([]*Channel, error) {
+	var out ListChannelsResponse
+	if err := m.doJSON(ctx, http.MethodGet, "/channels", nil, &out); err != nil {
+		return nil, fmt.Errorf("ListChannels: %w", err)
+	}
+	return out.Channels, nil
+}
+
+// RevokeChannel calls DELETE /channels/:id to remove a channel. Returns
+// ErrLeaseNotFound if the server responds with 404.
+func (m *ManagementClient) RevokeChannel(ctx context.Context, channelID string) error {
+	if err := m.doJSON(ctx, http.MethodDelete, "/channels/"+channelID, nil, nil); err != nil {
+		return fmt.Errorf("RevokeChannel: %w", err)
+	}
+	return nil
+}
+
+// ListListeners calls GET /listeners and returns all connected listener registrations.
+func (m *ManagementClient) ListListeners(ctx context.Context) ([]*ListenerRegistration, error) {
+	var out ListListenersResponse
+	if err := m.doJSON(ctx, http.MethodGet, "/listeners", nil, &out); err != nil {
+		return nil, fmt.Errorf("ListListeners: %w", err)
+	}
+	return out.Listeners, nil
+}
+
 // ── Connection operations ─────────────────────────────────────────────────────
 
 // ListConnections calls GET /connections and returns all live tunnel sessions.

@@ -1,8 +1,0 @@
-# Local secrets — never commit
-.env
-
-# Generated config (rendered from hyphae/config.yaml.template by 'make render-config')
-hyphae/config.yaml
-
-# Local image tag written by build-local.sh
-.local-image-tag

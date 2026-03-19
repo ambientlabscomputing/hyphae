@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"fmt"
 	"regexp"
 	"time"
@@ -32,28 +33,62 @@ type Service interface {
 
 	// Connection queries
 	ListConnections(ctx context.Context) ([]*sdk.TunnelConnection, error)
+
+	// ── Channel operations (UNDF-111) ────────────────────────────────────────
+
+	// RegisterChannel stores a pre-built channel received from server_api.
+	// server_api is the sole authority for channel creation and grant signing.
+	RegisterChannel(ctx context.Context, ch *sdk.Channel) error
+	GetChannel(ctx context.Context, channelID string) (*sdk.Channel, error)
+	ListChannels(ctx context.Context) ([]*sdk.Channel, error)
+	RevokeChannel(ctx context.Context, channelID string) error
+	UpdateChannelStatus(ctx context.Context, channelID string, status sdk.ChannelStatus) error
+	AddChannelBytes(ctx context.Context, channelID string, n int64)
+
+	// ValidateChannelGrant parses and verifies a channel grant JWT, returning
+	// the embedded claims. Returns an error if the JWT is expired, tampered,
+	// or signed with an unexpected key.
+	ValidateChannelGrant(ctx context.Context, grantToken string) (*sdk.ChannelGrant, error)
+
+	// Listener operations
+	RegisterListener(ctx context.Context, serverID, orgID string, session *yamux.Session) error
+	GetListenerSession(ctx context.Context, serverID string) (*yamux.Session, error)
+	UnregisterListener(ctx context.Context, serverID string, session *yamux.Session) error
+	ListListeners(ctx context.Context) ([]*sdk.ListenerRegistration, error)
 }
 
 // ServiceConfig holds policy limits for the service layer.
 type ServiceConfig struct {
 	MaxLeasesPerOrg int   // 0 = 100 default
 	MaxTTLSeconds   int64 // 0 = 86400 default
+
+	// Channel config (UNDF-111). All channel fields are ignored when
+	// ChannelsEnabled is false.
+	ChannelsEnabled       bool
+	ChannelGrantVerifyKey *ecdsa.PublicKey // server_api's ES256 public key
+	ChannelMaxIdleSeconds int              // 0 = 60 default
 }
 
 // AppService implements Service.
 type AppService struct {
-	repo repository.Repository
-	cfg  ServiceConfig
+	repo        repository.Repository
+	channelRepo repository.ChannelRepository
+	cfg         ServiceConfig
 }
 
-func NewService(ctx context.Context, repo repository.Repository, cfg ServiceConfig) (Service, error) {
+func NewService(ctx context.Context, repo repository.Repository, channelRepo repository.ChannelRepository, cfg ServiceConfig) (Service, error) {
 	if cfg.MaxLeasesPerOrg == 0 {
 		cfg.MaxLeasesPerOrg = 100
 	}
 	if cfg.MaxTTLSeconds == 0 {
 		cfg.MaxTTLSeconds = 86400
 	}
-	return &AppService{repo: repo, cfg: cfg}, nil
+	if cfg.ChannelsEnabled {
+		if cfg.ChannelMaxIdleSeconds == 0 {
+			cfg.ChannelMaxIdleSeconds = 60
+		}
+	}
+	return &AppService{repo: repo, channelRepo: channelRepo, cfg: cfg}, nil
 }
 
 func (s *AppService) IssueLease(ctx context.Context, req sdk.IssueLeaseRequest) (*sdk.Lease, error) {

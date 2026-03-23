@@ -20,7 +20,7 @@ import (
 // Flow:
 //  1. Send 101 Switching Protocols to acknowledge the upgrade
 //  2. Start a yamux.Server session over the TLS connection
-//  3. Register the session in the channel repository by serverID
+//  3. Register the session in the channel repository by (serverID, channelID)
 //  4. Drain the AcceptStream loop to keep the session alive (yamux flow control)
 //  5. On connection close, unregister the listener
 //
@@ -31,9 +31,10 @@ func (s *Server) handleListenerConn(
 	tlsConn *tls.Conn,
 	nodeServerID string,
 	orgID string,
+	channelID string,
 	br *bufio.Reader,
 ) {
-	logger := utils.GetLogger(ctx).With("listener", nodeServerID, "org_id", orgID)
+	logger := utils.GetLogger(ctx).With("listener", nodeServerID, "org_id", orgID, "channel_id", channelID)
 
 	if orgID == "" {
 		logger.Warn("Listener: missing X-Org-ID header")
@@ -78,7 +79,7 @@ func (s *Server) handleListenerConn(
 	}
 
 	// ── 3. Register session ───────────────────────────────────────────────────
-	if err := s.svc.RegisterListener(ctx, nodeServerID, orgID, session); err != nil {
+	if err := s.svc.RegisterListener(ctx, nodeServerID, orgID, channelID, session); err != nil {
 		logger.Error("Listener: failed to register session", "error", err)
 		session.Close()
 		return
@@ -103,7 +104,7 @@ func (s *Server) handleListenerConn(
 	}
 
 	// ── 5. Unregister ─────────────────────────────────────────────────────────
-	if err := s.svc.UnregisterListener(ctx, nodeServerID, session); err != nil {
+	if err := s.svc.UnregisterListener(ctx, nodeServerID, channelID, session); err != nil {
 		logger.Warn("Listener: failed to unregister session", "error", err)
 	}
 

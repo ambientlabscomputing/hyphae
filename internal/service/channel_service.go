@@ -124,25 +124,25 @@ func (s *AppService) AddChannelBytes(ctx context.Context, channelID string, n in
 
 // ── Listener operations ───────────────────────────────────────────────────────
 
-func (s *AppService) RegisterListener(ctx context.Context, serverID, orgID string, session *yamux.Session) error {
+func (s *AppService) RegisterListener(ctx context.Context, serverID, orgID, channelID string, session *yamux.Session) error {
 	if !s.cfg.ChannelsEnabled {
 		return errChannelsDisabled
 	}
-	return s.channelRepo.RegisterListener(ctx, serverID, orgID, session)
+	return s.channelRepo.RegisterListener(ctx, serverID, orgID, channelID, session)
 }
 
-func (s *AppService) GetListenerSession(ctx context.Context, serverID string) (*yamux.Session, error) {
+func (s *AppService) GetListenerSession(ctx context.Context, serverID, channelID string) (*yamux.Session, error) {
 	if !s.cfg.ChannelsEnabled {
 		return nil, errChannelsDisabled
 	}
-	return s.channelRepo.GetListenerSession(ctx, serverID)
+	return s.channelRepo.GetListenerSession(ctx, serverID, channelID)
 }
 
-func (s *AppService) UnregisterListener(ctx context.Context, serverID string, session *yamux.Session) error {
+func (s *AppService) UnregisterListener(ctx context.Context, serverID, channelID string, session *yamux.Session) error {
 	if !s.cfg.ChannelsEnabled {
 		return errChannelsDisabled
 	}
-	return s.channelRepo.UnregisterListener(ctx, serverID, session)
+	return s.channelRepo.UnregisterListener(ctx, serverID, channelID, session)
 }
 
 func (s *AppService) ListListeners(ctx context.Context) ([]*sdk.ListenerRegistration, error) {

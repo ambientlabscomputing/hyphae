@@ -24,10 +24,12 @@ type ChannelRepository interface {
 	UpdateChannelStatus(ctx context.Context, channelID string, status sdk.ChannelStatus) error
 	AddChannelBytes(ctx context.Context, channelID string, n int64)
 
-	// Listener registry — agents pre-register to receive inbound channels
-	RegisterListener(ctx context.Context, serverID, orgID string, session *yamux.Session) error
-	GetListenerSession(ctx context.Context, serverID string) (*yamux.Session, error)
-	UnregisterListener(ctx context.Context, serverID string, session *yamux.Session) error
+	// Listener registry — agents pre-register to receive inbound channels.
+	// Each listener session is keyed by (serverID, channelID) so that multiple
+	// channels for the same destination agent get independent yamux sessions.
+	RegisterListener(ctx context.Context, serverID, orgID, channelID string, session *yamux.Session) error
+	GetListenerSession(ctx context.Context, serverID, channelID string) (*yamux.Session, error)
+	UnregisterListener(ctx context.Context, serverID, channelID string, session *yamux.Session) error
 	ListListeners(ctx context.Context) ([]*sdk.ListenerRegistration, error)
 }
 
@@ -35,6 +37,7 @@ type ChannelRepository interface {
 type listenerEntry struct {
 	serverID    string
 	orgID       string
+	channelID   string
 	session     *yamux.Session
 	connectedAt time.Time
 }
@@ -45,7 +48,7 @@ type listenerEntry struct {
 type MemoryChannelRepository struct {
 	mu        sync.RWMutex
 	channels  map[string]*sdk.Channel   // channelID → Channel
-	listeners map[string]*listenerEntry // serverID → listener
+	listeners map[string]*listenerEntry // "serverID:channelID" → listener
 }
 
 // NewChannelRepository creates a MemoryChannelRepository and starts the
@@ -130,50 +133,54 @@ func (r *MemoryChannelRepository) AddChannelBytes(_ context.Context, channelID s
 	}
 }
 
-// RegisterListener stores the listener's yamux session keyed by serverID.
-// If a stale session is already registered, it is closed before replacement.
-func (r *MemoryChannelRepository) RegisterListener(_ context.Context, serverID, orgID string, session *yamux.Session) error {
+// RegisterListener stores the listener's yamux session keyed by (serverID, channelID).
+// If a stale session is already registered for the same key, it is closed before replacement.
+func (r *MemoryChannelRepository) RegisterListener(_ context.Context, serverID, orgID, channelID string, session *yamux.Session) error {
 	if serverID == "" {
 		return fmt.Errorf("serverID is required for listener registration")
 	}
+	key := serverID + ":" + channelID
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if existing, ok := r.listeners[serverID]; ok {
+	if existing, ok := r.listeners[key]; ok {
 		existing.session.Close() //nolint:errcheck
 	}
-	r.listeners[serverID] = &listenerEntry{
+	r.listeners[key] = &listenerEntry{
 		serverID:    serverID,
 		orgID:       orgID,
+		channelID:   channelID,
 		session:     session,
 		connectedAt: time.Now(),
 	}
 	return nil
 }
 
-// GetListenerSession returns the yamux session for the given serverID.
-func (r *MemoryChannelRepository) GetListenerSession(_ context.Context, serverID string) (*yamux.Session, error) {
+// GetListenerSession returns the yamux session for the given (serverID, channelID).
+func (r *MemoryChannelRepository) GetListenerSession(_ context.Context, serverID, channelID string) (*yamux.Session, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	entry, ok := r.listeners[serverID]
+	key := serverID + ":" + channelID
+	entry, ok := r.listeners[key]
 	if !ok {
-		return nil, fmt.Errorf("no listener registered for server %q", serverID)
+		return nil, fmt.Errorf("no listener registered for server %q channel %q", serverID, channelID)
 	}
 	return entry.session, nil
 }
 
-// UnregisterListener removes the listener for serverID, but only if the
+// UnregisterListener removes the listener for (serverID, channelID), but only if the
 // registered session matches the provided session. This prevents a stale
 // session's cleanup goroutine from removing a newer replacement session.
 // If session is nil, it unconditionally removes the entry (backward compat).
-func (r *MemoryChannelRepository) UnregisterListener(_ context.Context, serverID string, session *yamux.Session) error {
+func (r *MemoryChannelRepository) UnregisterListener(_ context.Context, serverID, channelID string, session *yamux.Session) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	key := serverID + ":" + channelID
 	if session != nil {
-		if entry, ok := r.listeners[serverID]; ok && entry.session != session {
+		if entry, ok := r.listeners[key]; ok && entry.session != session {
 			return nil // a newer session has already replaced us
 		}
 	}
-	delete(r.listeners, serverID)
+	delete(r.listeners, key)
 	return nil
 }
 

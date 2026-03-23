@@ -51,9 +51,9 @@ type Service interface {
 	ValidateChannelGrant(ctx context.Context, grantToken string) (*sdk.ChannelGrant, error)
 
 	// Listener operations
-	RegisterListener(ctx context.Context, serverID, orgID string, session *yamux.Session) error
-	GetListenerSession(ctx context.Context, serverID string) (*yamux.Session, error)
-	UnregisterListener(ctx context.Context, serverID string, session *yamux.Session) error
+	RegisterListener(ctx context.Context, serverID, orgID, channelID string, session *yamux.Session) error
+	GetListenerSession(ctx context.Context, serverID, channelID string) (*yamux.Session, error)
+	UnregisterListener(ctx context.Context, serverID, channelID string, session *yamux.Session) error
 	ListListeners(ctx context.Context) ([]*sdk.ListenerRegistration, error)
 }
 

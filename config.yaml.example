@@ -32,7 +32,7 @@ tunnel:
   tls_cert: "certs/tunnel.crt"          # tunnel server certificate (signed by platform CA)
   tls_key: "certs/tunnel.key"           # tunnel server private key
   handshake_timeout: "10s"              # TLS + HTTP upgrade deadline per connection
-  max_connections_per_node: 50          # max simultaneous tunnels per node (by cert CN)
+  max_connections_per_node: 256         # max simultaneous tunnels per node (by cert CN)
   max_total_connections: 1000           # max simultaneous tunnel sessions across all nodes
 
 # Auth0 JWT validation (for the management REST API)

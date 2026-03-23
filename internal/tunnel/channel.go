@@ -96,7 +96,7 @@ func (s *Server) handleChannelConn(
 		const maxAttempts = 5
 		backoff := 200 * time.Millisecond
 		for attempt := 1; attempt <= maxAttempts; attempt++ {
-			listenerSession, err := s.svc.GetListenerSession(ctx, grant.DestServerID)
+			listenerSession, err := s.svc.GetListenerSession(ctx, grant.DestServerID, channelID)
 			if err != nil {
 				if attempt == maxAttempts {
 					logger.Warn("Channel: no listener registered for destination",
@@ -176,7 +176,21 @@ func (s *Server) handleChannelConn(
 // splice bidirectionally copies between a and b. It blocks until one direction
 // closes, then closes both sides and waits for the second goroutine to finish.
 // Returns the byte counts for each direction.
+//
+// If idleTimeout > 0 and a or b implements net.Conn, the idle timeout is
+// applied as a read/write deadline so that a stalled connection unblocks the
+// goroutines rather than leaking them forever.
 func splice(a, b io.ReadWriteCloser, idleTimeout time.Duration) (aToB, bToA int64) {
+	if idleTimeout > 0 {
+		deadline := time.Now().Add(idleTimeout)
+		if nc, ok := a.(net.Conn); ok {
+			nc.SetDeadline(deadline) //nolint:errcheck
+		}
+		if nc, ok := b.(net.Conn); ok {
+			nc.SetDeadline(deadline) //nolint:errcheck
+		}
+	}
+
 	type result struct{ n int64 }
 	chA := make(chan result, 1)
 	chB := make(chan result, 1)
@@ -190,20 +204,24 @@ func splice(a, b io.ReadWriteCloser, idleTimeout time.Duration) (aToB, bToA int6
 		chB <- result{n}
 	}()
 
-	// The idle timeout is enforced via SetDeadline on the underlying net.Conn
-	// objects (if they are net.Conn). Here we rely on the connection-level
-	// keepalive; the idleTimeout parameter is plumbed for future use.
-	_ = idleTimeout
-
-	// Wait for the first direction to finish, then close both to unblock the other.
+	// Wait for the first direction to finish, then close both sides to ensure
+	// the second goroutine unblocks. A short deadline on any remaining net.Conn
+	// provides a safety net in case Close alone is insufficient.
+	const closeGracePeriod = 5 * time.Second
 	select {
 	case r := <-chA:
 		aToB = r.n
+		if nc, ok := b.(net.Conn); ok {
+			nc.SetDeadline(time.Now().Add(closeGracePeriod)) //nolint:errcheck
+		}
 		a.Close() //nolint:errcheck
 		b.Close() //nolint:errcheck
 		bToA = (<-chB).n
 	case r := <-chB:
 		bToA = r.n
+		if nc, ok := a.(net.Conn); ok {
+			nc.SetDeadline(time.Now().Add(closeGracePeriod)) //nolint:errcheck
+		}
 		a.Close() //nolint:errcheck
 		b.Close() //nolint:errcheck
 		aToB = (<-chA).n

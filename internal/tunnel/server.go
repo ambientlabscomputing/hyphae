@@ -289,6 +289,20 @@ func (s *Server) handleConn(ctx context.Context, rawConn net.Conn) {
 	channelID := req.Header.Get("X-Channel-ID")
 	listenerReg := req.Header.Get("X-Listener-Register")
 
+	// ── Listener registration (UNDF-111) ──────────────────────────────────────
+	// Checked before X-Channel-ID so that a listener upgrade request that also
+	// carries X-Channel-ID is routed to the listener handler, not the initiator.
+	if listenerReg == "true" {
+		if !s.channelsEnabled {
+			writeHTTPError(tlsConn, http.StatusNotImplemented, "channels not enabled")
+			rawConn.Close()
+			return
+		}
+		orgID := req.Header.Get("X-Org-ID")
+		s.handleListenerConn(ctx, tlsConn, nodeServerID, orgID, channelID, br)
+		return
+	}
+
 	// ── Channel relay routing (UNDF-111) ──────────────────────────────────────
 	if channelID != "" {
 		if !s.channelsEnabled {
@@ -298,16 +312,6 @@ func (s *Server) handleConn(ctx context.Context, rawConn net.Conn) {
 		}
 		grantToken := req.Header.Get("X-Channel-Grant")
 		s.handleChannelConn(ctx, tlsConn, nodeServerID, channelID, grantToken, br)
-		return
-	}
-	if listenerReg == "true" {
-		if !s.channelsEnabled {
-			writeHTTPError(tlsConn, http.StatusNotImplemented, "channels not enabled")
-			rawConn.Close()
-			return
-		}
-		orgID := req.Header.Get("X-Org-ID")
-		s.handleListenerConn(ctx, tlsConn, nodeServerID, orgID, br)
 		return
 	}
 

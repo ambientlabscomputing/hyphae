@@ -76,6 +76,7 @@ type Settings struct {
 		Enabled            bool   `yaml:"enabled"`               // default: false
 		GrantVerifyKeyPath string `yaml:"grant_verify_key_path"` // path to server_api ES256 public key PEM
 		MaxIdleSeconds     int    `yaml:"max_idle_seconds"`      // 0 = 60 (default)
+		ReapInterval       string `yaml:"reap_interval"`         // how often the reaper runs, default "5s"
 	} `yaml:"channels"`
 
 	// Admin Unix socket (hyphctl)

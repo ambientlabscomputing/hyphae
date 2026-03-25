@@ -136,6 +136,27 @@ func (s *Server) Listen(ctx context.Context) error {
 
 	logger.Info("Tunnel listener started", "port", s.port)
 
+	// Background goroutine: GC the nodeConns sync.Map every 30 seconds.
+	// Entries with a zero counter accumulate indefinitely for nodes that have
+	// fully disconnected, which could cause unbounded memory growth over time.
+	go func() {
+		gcTicker := time.NewTicker(30 * time.Second)
+		defer gcTicker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-gcTicker.C:
+				s.nodeConns.Range(func(key, value any) bool {
+					if counter := value.(*atomic.Int32); counter.Load() == 0 {
+						s.nodeConns.Delete(key)
+					}
+					return true
+				})
+			}
+		}
+	}()
+
 	go func() {
 		<-ctx.Done()
 		ln.Close()

@@ -42,7 +42,11 @@ func main() {
 	logger.Info("Starting hyphae", "version", version)
 
 	repo := repository.NewRepository(ctx)
-	channelRepo := repository.NewChannelRepository(ctx)
+	reaperInterval := 5 * time.Second
+	if d, err := time.ParseDuration(settings.Channels.ReapInterval); err == nil && d > 0 {
+		reaperInterval = d
+	}
+	channelRepo := repository.NewChannelRepository(ctx, reaperInterval)
 
 	// Load channel grant verify key if the feature is enabled.
 	var channelGrantVerifyKey *ecdsa.PublicKey

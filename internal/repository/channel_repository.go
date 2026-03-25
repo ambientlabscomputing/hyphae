@@ -42,21 +42,37 @@ type listenerEntry struct {
 	connectedAt time.Time
 }
 
+// errorGracePeriod is how long a channel may stay in error state before the
+// watchdog evicts it. 60 seconds is enough for any in-flight retry to resolve
+// itself while still keeping the connection pool clean.
+const errorGracePeriod = 60 * time.Second
+
 // MemoryChannelRepository is a thread-safe in-memory ChannelRepository.
 // All state is isolated behind its own RWMutex — no shared locks with the
 // exposure MemoryRepository.
 type MemoryChannelRepository struct {
-	mu        sync.RWMutex
-	channels  map[string]*sdk.Channel   // channelID → Channel
-	listeners map[string]*listenerEntry // "serverID:channelID" → listener
+	mu             sync.RWMutex
+	channels       map[string]*sdk.Channel   // channelID → Channel
+	listeners      map[string]*listenerEntry // "serverID:channelID" → listener
+	errorAt        map[string]time.Time      // channelID → time channel entered error state
+	reaperInterval time.Duration
 }
 
+// defaultReapInterval is used when no interval is provided to NewChannelRepository.
+const defaultReapInterval = 5 * time.Second
+
 // NewChannelRepository creates a MemoryChannelRepository and starts the
-// background expiry reaper.
-func NewChannelRepository(ctx context.Context) ChannelRepository {
+// background expiry reaper. reaperInterval controls how often the reaper
+// scans for stale channels; pass 0 to use the default (5 s).
+func NewChannelRepository(ctx context.Context, reaperInterval time.Duration) ChannelRepository {
+	if reaperInterval <= 0 {
+		reaperInterval = defaultReapInterval
+	}
 	r := &MemoryChannelRepository{
-		channels:  make(map[string]*sdk.Channel),
-		listeners: make(map[string]*listenerEntry),
+		channels:       make(map[string]*sdk.Channel),
+		listeners:      make(map[string]*listenerEntry),
+		errorAt:        make(map[string]time.Time),
+		reaperInterval: reaperInterval,
 	}
 	go r.reapExpiredChannels(ctx)
 	return r
@@ -102,11 +118,13 @@ func (r *MemoryChannelRepository) RevokeChannel(_ context.Context, channelID str
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	delete(r.channels, channelID)
+	delete(r.errorAt, channelID)
 	return nil
 }
 
 // UpdateChannelStatus transitions a channel to a new status, also setting
-// ActivatedAt when transitioning to active.
+// ActivatedAt when transitioning to active. Tracks the time a channel enters
+// error state so the watchdog can evict it after the grace period.
 func (r *MemoryChannelRepository) UpdateChannelStatus(_ context.Context, channelID string, status sdk.ChannelStatus) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -118,6 +136,13 @@ func (r *MemoryChannelRepository) UpdateChannelStatus(_ context.Context, channel
 	if status == sdk.ChannelStatusActive && ch.ActivatedAt == nil {
 		now := time.Now()
 		ch.ActivatedAt = &now
+	}
+	if status == sdk.ChannelStatusError {
+		if _, alreadyTracked := r.errorAt[channelID]; !alreadyTracked {
+			r.errorAt[channelID] = time.Now()
+		}
+	} else {
+		delete(r.errorAt, channelID)
 	}
 	return nil
 }
@@ -199,10 +224,11 @@ func (r *MemoryChannelRepository) ListListeners(_ context.Context) ([]*sdk.Liste
 	return out, nil
 }
 
-// reapExpiredChannels runs as a background goroutine and evicts channels past
-// their ExpiresAt time, updating their status to closed.
+// reapExpiredChannels runs as a background goroutine on a configurable tick.
+// It evicts TTL-expired channels, evicts channels that have been stuck in
+// error state past the grace period, and prunes dead listener sessions.
 func (r *MemoryChannelRepository) reapExpiredChannels(ctx context.Context) {
-	ticker := time.NewTicker(time.Minute)
+	ticker := time.NewTicker(r.reaperInterval)
 	defer ticker.Stop()
 	for {
 		select {
@@ -210,6 +236,7 @@ func (r *MemoryChannelRepository) reapExpiredChannels(ctx context.Context) {
 			return
 		case <-ticker.C:
 			r.expireChannels()
+			r.pruneDeadListeners()
 		}
 	}
 }
@@ -222,6 +249,28 @@ func (r *MemoryChannelRepository) expireChannels() {
 		if now.After(ch.ExpiresAt) {
 			ch.Status = sdk.ChannelStatusClosed
 			delete(r.channels, id)
+			delete(r.errorAt, id)
+			continue
+		}
+		// Evict channels that have been stuck in error state past the grace period.
+		// These accumulate during retry storms and exhaust the per-node connection
+		// limit, blocking all subsequent channel establishment.
+		if errTime, inError := r.errorAt[id]; inError && now.Sub(errTime) > errorGracePeriod {
+			delete(r.channels, id)
+			delete(r.errorAt, id)
+		}
+	}
+}
+
+// pruneDeadListeners removes listener sessions whose yamux connection has
+// already closed. This prevents orphaned entries from blocking re-registration
+// and avoids routing new initiators to a dead session.
+func (r *MemoryChannelRepository) pruneDeadListeners() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for key, entry := range r.listeners {
+		if entry.session.IsClosed() {
+			delete(r.listeners, key)
 		}
 	}
 }

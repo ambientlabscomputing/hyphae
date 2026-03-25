@@ -56,3 +56,10 @@ leases:
 admin_socket:
   enabled: true
   socket_path: "/tmp/hyphae_admin.sock"
+
+# Channel relay settings (UNDF-111)
+channels:
+  enabled: false
+  grant_verify_key_path: ""              # path to server_api ES256 public key PEM
+  max_idle_seconds: 60                   # max idle time before a channel is closed
+  reap_interval: "5s"                    # how often the reaper scans for stale channels

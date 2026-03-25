@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/ambientlabscomputing/hyphae/sdk"
 	jwt "github.com/golang-jwt/jwt/v4"
@@ -54,6 +55,11 @@ func (s *AppService) RegisterChannel(ctx context.Context, ch *sdk.Channel) error
 
 // ── ValidateChannelGrant ──────────────────────────────────────────────────────
 
+// clockSkewLeeway is the tolerance applied when validating the grant JWT
+// expiry claim. Clock drift between agent VMs and the hyphae host of up to
+// this duration will not cause grant rejections.
+const clockSkewLeeway = 30 * time.Second
+
 // ValidateChannelGrant parses and cryptographically verifies a channel grant
 // JWT using server_api's ES256 public key. Returns the extracted claims or an
 // error if the token is invalid, expired, or signed with an unexpected key.
@@ -65,8 +71,12 @@ func (s *AppService) ValidateChannelGrant(_ context.Context, grantToken string) 
 		return nil, fmt.Errorf("channels: grant token is required")
 	}
 
+	// Parse without built-in claims validation so we can apply clockSkewLeeway
+	// to the expiry check ourselves. This avoids spurious "token expired" errors
+	// when the agent VM clock is slightly behind the hyphae host clock.
 	var claims channelGrantClaims
-	_, err := jwt.ParseWithClaims(grantToken, &claims, func(t *jwt.Token) (interface{}, error) {
+	p := jwt.NewParser(jwt.WithoutClaimsValidation())
+	_, err := p.ParseWithClaims(grantToken, &claims, func(t *jwt.Token) (interface{}, error) {
 		if _, ok := t.Method.(*jwt.SigningMethodECDSA); !ok {
 			return nil, fmt.Errorf("channels: unexpected signing method %q", t.Header["alg"])
 		}
@@ -74,6 +84,12 @@ func (s *AppService) ValidateChannelGrant(_ context.Context, grantToken string) 
 	})
 	if err != nil {
 		return nil, fmt.Errorf("channels: invalid grant: %w", err)
+	}
+
+	// Validate expiry manually with leeway.
+	if claims.ExpiresAt != nil && time.Now().After(claims.ExpiresAt.Time.Add(clockSkewLeeway)) {
+		return nil, fmt.Errorf("channels: invalid grant: token is expired by %s",
+			time.Since(claims.ExpiresAt.Time).Round(time.Millisecond))
 	}
 
 	return &sdk.ChannelGrant{

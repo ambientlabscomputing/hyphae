@@ -54,16 +54,16 @@ clean:
 	rm -f bin/hyphae bin/hyphctl
 	rm -rf docs
 
-.PHONY: docker-publish-dev
-docker-publish-dev:
+.PHONY: docker-push
+docker-push:
 	docker build -t ambientlabsjose/hyphae:develop . && \
 	docker push ambientlabsjose/hyphae:develop
 
 TAG ?=
-.PHONY: docker-publish-tag
-docker-publish-tag:
+.PHONY: docker-push-tag
+docker-push-tag:
 	@if [ -z "$(TAG)" ]; then \
-		echo "Error: TAG is required. Usage: make docker-publish-tag TAG=v1.2.3" >&2; \
+		echo "Error: TAG is required. Usage: make docker-push-tag TAG=v1.2.3" >&2; \
 		exit 1; \
 	fi
 	docker build -t ambientlabsjose/hyphae:$(TAG) . && \

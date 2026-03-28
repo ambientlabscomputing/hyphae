@@ -112,13 +112,24 @@ func (r *MemoryChannelRepository) ListChannels(_ context.Context) ([]*sdk.Channe
 	return out, nil
 }
 
-// RevokeChannel removes a channel and closes any associated listener stream
-// that was opened for it. If the channel does not exist, the call is a no-op.
+// RevokeChannel removes a channel and closes any associated listener yamux
+// sessions that were opened for it. If the channel does not exist, the call
+// is a no-op. Closing the sessions unblocks the drain loop in
+// handleListenerConn, which will then unregister the listener.
 func (r *MemoryChannelRepository) RevokeChannel(_ context.Context, channelID string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	delete(r.channels, channelID)
 	delete(r.errorAt, channelID)
+
+	// Close and remove listener sessions associated with this channel.
+	suffix := ":" + channelID
+	for key, entry := range r.listeners {
+		if len(key) > len(suffix) && key[len(key)-len(suffix):] == suffix {
+			entry.session.Close()
+			delete(r.listeners, key)
+		}
+	}
 	return nil
 }
 

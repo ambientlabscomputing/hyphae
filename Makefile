@@ -56,8 +56,7 @@ clean:
 
 .PHONY: docker-push
 docker-push:
-	docker build -t ambientlabsjose/hyphae:develop . && \
-	docker push ambientlabsjose/hyphae:develop
+	docker buildx build --platform linux/amd64 -t ambientlabsjose/hyphae:develop --push .
 
 TAG ?=
 .PHONY: docker-push-tag
@@ -66,8 +65,7 @@ docker-push-tag:
 		echo "Error: TAG is required. Usage: make docker-push-tag TAG=v1.2.3" >&2; \
 		exit 1; \
 	fi
-	docker build -t ambientlabsjose/hyphae:$(TAG) . && \
-	docker push ambientlabsjose/hyphae:$(TAG)
+	docker buildx build --platform linux/amd64 -t ambientlabsjose/hyphae:$(TAG) --push .
 	@echo "Published ambientlabsjose/hyphae:$(TAG)"
 
 .PHONY: tidy

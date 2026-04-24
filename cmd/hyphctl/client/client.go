@@ -2,27 +2,12 @@
 package client
 
 import (
-	"context"
-	"fmt"
-	"time"
-
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 
 	"github.com/ambientlabscomputing/hyphae/internal/proto/admin"
 )
 
-type adminClientKey struct{}
-
-func WithClient(ctx context.Context, c *AdminClient) context.Context {
-	return context.WithValue(ctx, adminClientKey{}, c)
-}
-
-func GetClient(ctx context.Context) *AdminClient {
-	c, _ := ctx.Value(adminClientKey{}).(*AdminClient)
-	return c
-}
-
+// AdminClient wraps a gRPC connection and provides lazy service client accessors.
 type AdminClient struct {
 	conn        *grpc.ClientConn
 	health      admin.AdminHealthServiceClient
@@ -30,18 +15,10 @@ type AdminClient struct {
 	connections admin.AdminConnectionsServiceClient
 }
 
-func NewAdminClient(socketPath string, _ time.Duration) (*AdminClient, error) {
-	conn, err := grpc.NewClient(
-		"unix://"+socketPath,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("admin client %s: %w", socketPath, err)
-	}
-	return &AdminClient{conn: conn}, nil
+// NewAdminClientFromConn creates an AdminClient from an existing gRPC connection.
+func NewAdminClientFromConn(conn *grpc.ClientConn) *AdminClient {
+	return &AdminClient{conn: conn}
 }
-
-func (c *AdminClient) Close() error { return c.conn.Close() }
 
 func (c *AdminClient) Health() admin.AdminHealthServiceClient {
 	if c.health == nil {

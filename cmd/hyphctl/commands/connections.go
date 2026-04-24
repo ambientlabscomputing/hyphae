@@ -5,7 +5,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/ambientlabscomputing/hyphae/cmd/hyphctl/ui"
+	"github.com/ambientlabscomputing/adminclicore/ui"
 	"github.com/ambientlabscomputing/hyphae/internal/proto/admin"
 )
 
@@ -29,13 +29,13 @@ func connectionsListCmd() *cobra.Command {
 			}
 			resp, err := d.client.Connections().List(d.ctx, &admin.Empty{})
 			if err != nil {
-				return fmt.Errorf("%s", ui.HandleGRPCError(err))
+				return fmt.Errorf("%s", ui.HandleGRPCError(err, "is hyphae running with admin socket enabled?"))
 			}
 			switch d.printer.Format() {
 			case ui.FormatJSON, ui.FormatYAML:
 				return d.printer.PrintData(resp)
 			default:
-				t := ui.NewTableBuilder().
+				t := ui.NewTableBuilder(d.printer.Format()).
 					WithTitle("Connections").
 					WithHeaders("Conn ID", "Lease ID", "Server ID", "Remote Addr", "Connected At")
 				for _, c := range resp.Connections {

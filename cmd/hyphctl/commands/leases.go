@@ -5,7 +5,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/ambientlabscomputing/hyphae/cmd/hyphctl/ui"
+	"github.com/ambientlabscomputing/adminclicore/flags"
+	"github.com/ambientlabscomputing/adminclicore/ui"
 	"github.com/ambientlabscomputing/hyphae/internal/proto/admin"
 )
 
@@ -30,13 +31,13 @@ func leasesListCmd() *cobra.Command {
 			}
 			resp, err := d.client.Leases().List(d.ctx, &admin.Empty{})
 			if err != nil {
-				return fmt.Errorf("%s", ui.HandleGRPCError(err))
+				return fmt.Errorf("%s", ui.HandleGRPCError(err, "is hyphae running with admin socket enabled?"))
 			}
 			switch d.printer.Format() {
 			case ui.FormatJSON, ui.FormatYAML:
 				return d.printer.PrintData(resp)
 			default:
-				t := ui.NewTableBuilder().
+				t := ui.NewTableBuilder(d.printer.Format()).
 					WithTitle("Leases").
 					WithHeaders("ID", "Hostname", "Org ID", "Server ID", "Status", "Created At", "Bound At")
 				for _, l := range resp.Leases {
@@ -61,7 +62,7 @@ func leasesGetCmd() *cobra.Command {
 			}
 			resp, err := d.client.Leases().Get(d.ctx, &admin.GetLeaseRequest{LeaseId: args[0]})
 			if err != nil {
-				return fmt.Errorf("%s", ui.HandleGRPCError(err))
+				return fmt.Errorf("%s", ui.HandleGRPCError(err, "is hyphae running with admin socket enabled?"))
 			}
 			switch d.printer.Format() {
 			case ui.FormatJSON, ui.FormatYAML:
@@ -82,7 +83,8 @@ func leasesGetCmd() *cobra.Command {
 }
 
 func leasesRevokeCmd() *cobra.Command {
-	return &cobra.Command{
+	var yes bool
+	cmd := &cobra.Command{
 		Use:   "revoke <lease-id>",
 		Short: "Revoke a lease and close its tunnel",
 		Args:  cobra.ExactArgs(1),
@@ -91,12 +93,24 @@ func leasesRevokeCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+
+			ok, err := flags.ConfirmOrSkip(d.printer, yes, fmt.Sprintf("Revoke lease %s?", args[0]))
+			if err != nil {
+				return err
+			}
+			if !ok {
+				d.printer.PrintWarning("Aborted")
+				return nil
+			}
+
 			_, err = d.client.Leases().Revoke(d.ctx, &admin.RevokeLeaseRequest{LeaseId: args[0]})
 			if err != nil {
-				return fmt.Errorf("%s", ui.HandleGRPCError(err))
+				return fmt.Errorf("%s", ui.HandleGRPCError(err, "is hyphae running with admin socket enabled?"))
 			}
 			d.printer.PrintSuccess("Lease " + args[0] + " revoked")
 			return nil
 		},
 	}
+	flags.RegisterYesFlag(cmd, &yes)
+	return cmd
 }
